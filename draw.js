@@ -38,6 +38,15 @@ export const STYLES = {
 };
 
 const LOOK_KIND = { hair: 'hairstyle', makeup: 'makeup' };
+
+/** Мелкие вещи в «лукбуке» — крупный план, а не человек в рандомном образе. */
+const DETAIL = {
+    acc: { focus: 'the accessory exactly where it is worn (on the fingers, wrist, neck, ears, shoulder or waist — wherever it belongs)', right: 'a cheerful waist-up portrait of the person wearing it' },
+    head: { focus: 'the headwear on the head, from a slight three-quarter angle', right: 'a cheerful head-and-shoulders portrait of the person wearing it' },
+    shoes: { focus: 'the feet and ankles wearing the shoes, from a low side angle', right: 'a full-body standing pose of the person wearing them' },
+    legwear: { focus: 'the legs wearing the hosiery or socks', right: 'a full-body standing pose of the person wearing them' },
+};
+const DETAIL_PROMPT = 'Fashion lookbook illustration in a clean semi-realistic digital sketch style with soft colored-pencil shading and crisp linework, two panels side by side: on the left a large, detailed close-up of {focus}; on the right {right}, dressed in simple plain neutral basics so this piece stands out as the hero. Solid black background with a faint white grid behind the close-up, playful hand-drawn white doodles around (little stars, hearts, sparkles, exclamation marks). Warm natural skin, expressive but natural face. No text, no logo.';
 const PERSON_REF_RULE = 'The attached reference image shows the exact person: keep their face, features, skin tone and body type exactly as in the reference.';
 
 export const DEFAULT_MODELS = {
@@ -84,13 +93,17 @@ export function itemPrompt(it, s, { personRef = false, photoRef = false } = {}) 
         lines.push(stylePrompt(s, 'look').replace('{kind}', kind));
         lines.push(`The ${kind}: ${it.name}.${it.desc ? ` ${it.desc}` : ''}`);
         if (kind === 'hairstyle') lines.push('Keep the person\'s own natural hair colour; only the hairstyle matters.');
+    } else if (s.imgStyle === 'clover' && DETAIL[it.slot]) {
+        lines.push(DETAIL_PROMPT.replace('{focus}', DETAIL[it.slot].focus).replace('{right}', DETAIL[it.slot].right));
+        lines.push(`The piece: ${it.name}.${it.desc ? ` ${it.desc}` : ''}`);
+        lines.push('Both panels show exactly this same piece with identical colour, material and details.');
     } else {
         lines.push(stylePrompt(s, 'p'));
         lines.push(`The item: ${it.name}.${it.desc ? ` ${it.desc}` : ''}`);
         if (!STYLES[s.imgStyle]?.person) lines.push('Show only this one item, centered, fully visible, nothing else in the frame.');
     }
     if (personRef && photoRef) lines.push('Two images are attached: image 1 is the person, image 2 is the photo of the item.');
-    if (personRef) lines.push(PERSON_REF_RULE + (kind === 'hairstyle' ? ' Change only the hairstyle.' : kind === 'makeup' ? ' Change only the makeup.' : ' Dress them in this item.'));
+    if (personRef) lines.push(PERSON_REF_RULE + (kind === 'hairstyle' ? ' Change only the hairstyle.' : kind === 'makeup' ? ' Change only the makeup.' : DETAIL[it.slot] && s.imgStyle === 'clover' ? ' Put this piece on them.' : ' Dress them in this item.'));
     if (photoRef) lines.push('The attached photo shows the real item (maybe as part of a whole outfit): reproduce ONLY this item from it, keeping its exact colour, fabric and details.');
     return lines.join('\n');
 }

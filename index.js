@@ -13,7 +13,7 @@ import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, resolveConnection, generateIma
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.3.0';
+const VERSION = '1.3.1';
 
 const DEFAULTS = {
     enabled: true,
@@ -804,9 +804,12 @@ function renderCloset() {
     const drawBtn = drawBusy
         ? `<button class="wd-btn danger" data-act="draw-stop"><i class="fa-solid fa-stop"></i> Стоп (${drawQ.length + 1})</button>`
         : missing ? `<button class="wd-btn" data-act="draw-missing"><i class="fa-solid fa-palette"></i> Дорисовать (${missing})</button>` : '';
+    const filtered = ui.slot !== 'all' || ui.owner !== 'all' || ui.q;
+    const redrawBtn = !drawBusy && filtered && items.length
+        ? `<button class="wd-btn" data-act="draw-shown"><i class="fa-solid fa-rotate"></i> Перерисовать показанные (${items.length})</button>` : '';
     return `<div class="wd-actions-row">
         <button class="wd-btn primary" data-act="new-item"><i class="fa-solid fa-plus"></i> Новая вещь или образ</button>
-        ${drawBtn}
+        ${drawBtn}${redrawBtn}
     </div>
     ${closetFilters()}
     ${items.length ? `<div class="wd-grid">${items.map(it => itemCard(it)).join('')}</div>`
@@ -1322,6 +1325,16 @@ async function onClick(ev) {
             const ids = s.items.filter(it => !it.img).map(it => it.id);
             if (!ids.length) break;
             if (!confirm(`Нарисовать ${ids.length} ${plural(ids.length, 'картинку', 'картинки', 'картинок')} через ${conn.apiType} (${conn.model})? Каждая — отдельный платный запрос.`)) break;
+            queueDraw(ids.map(i => ({ id: i })));
+            render();
+            break;
+        }
+        case 'draw-shown': {
+            const conn = imgConnection();
+            if (conn.error) { window.toastr?.warning(esc(conn.error), '👗 Гардероб', { timeOut: 7000 }); break; }
+            const ids = filteredItems().map(it => it.id);
+            if (!ids.length) break;
+            if (!confirm(`Перерисовать ${ids.length} ${plural(ids.length, 'картинку', 'картинки', 'картинок')} через ${conn.apiType} (${conn.model})? Старые картинки заменятся. Каждая — отдельный платный запрос.`)) break;
             queueDraw(ids.map(i => ({ id: i })));
             render();
             break;
