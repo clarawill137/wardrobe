@@ -12,7 +12,7 @@ import {
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 
 const DEFAULTS = {
     enabled: true,
@@ -63,7 +63,7 @@ function chatState() {
 function charState(name) {
     const w = chatState();
     if (!w || !name) return null;
-    if (!w.chars[name]) w.chars[name] = { worn: [], off: [] };
+    if (!w.chars[name] || typeof w.chars[name] !== 'object') w.chars[name] = { worn: [], off: [] };
     const st = w.chars[name];
     if (!Array.isArray(st.worn)) st.worn = [];
     if (!Array.isArray(st.off)) st.off = [];
@@ -595,10 +595,15 @@ function render() {
     panel.querySelectorAll('.wd-tab').forEach(b => b.classList.toggle('on', b.dataset.tab === ui.tab));
     const body = panel.querySelector('.wd-body');
     const scroll = body.scrollTop;
-    body.innerHTML = ui.tab === 'closet' ? renderCloset()
-        : ui.tab === 'sets' ? renderSets()
-            : ui.tab === 'cfg' ? renderCfg()
-                : renderWorn();
+    try {
+        body.innerHTML = ui.tab === 'closet' ? renderCloset()
+            : ui.tab === 'sets' ? renderSets()
+                : ui.tab === 'cfg' ? renderCfg()
+                    : renderWorn();
+    } catch (e) {
+        console.error('[Гардероб] render', e);
+        body.innerHTML = `<div class="wd-empty"><div class="wd-empty-ico">🧯</div><b>Ошибка гардероба</b><pre class="wd-pre" style="text-align:left">${esc(String(e?.stack || e).slice(0, 900))}</pre>Сделай скрин и кинь Claude.</div>`;
+    }
     body.scrollTop = scroll;
 }
 
@@ -1094,14 +1099,20 @@ function buildPanel() {
 }
 
 function openPanel(tab) {
-    buildPanel();
-    if (tab) ui.tab = tab;
-    ui.open = true;
-    render();
-    requestAnimationFrame(() => {
+    try {
+        buildPanel();
+        if (tab) ui.tab = tab;
+        ui.open = true;
+        render();
+    } catch (e) {
+        console.error('[Гардероб] open', e);
+        window.toastr?.error(esc(String(e?.message || e)), '👗 Гардероб: ошибка', { timeOut: 15000 });
+    }
+    // двойной кадр: iOS иначе пропускает анимацию и плашка остаётся за экраном
+    requestAnimationFrame(() => requestAnimationFrame(() => {
         document.getElementById('wd-backdrop')?.classList.add('on');
         document.getElementById('wd-panel')?.classList.add('on');
-    });
+    }));
 }
 
 function closePanel() {
@@ -1160,7 +1171,7 @@ function addWandButton() {
     btn.className = 'list-group-item flex-container flexGap5 interactable';
     btn.tabIndex = 0;
     btn.innerHTML = '<div class="fa-solid fa-shirt extensionsMenuExtensionButton"></div><span>Гардероб</span>';
-    btn.addEventListener('click', () => openPanel());
+    btn.addEventListener('click', () => setTimeout(() => openPanel(), 60));
     menu.append(btn);
     return true;
 }
@@ -1202,6 +1213,10 @@ function registerSlash() {
         }));
     } catch (e) { console.warn('[Гардероб] команда не зарегистрирована', e); }
 }
+
+window.addEventListener('error', (e) => {
+    if (String(e?.filename || '').includes('/wardrobe/')) window.toastr?.error(esc(`${e.message} (${String(e.filename).split('/').pop()}:${e.lineno})`), '👗 Гардероб: ошибка', { timeOut: 15000 });
+});
 
 jQuery(async () => {
     settings();
