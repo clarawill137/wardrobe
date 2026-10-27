@@ -13,7 +13,7 @@ import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, resolveConnection, generateIma
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.3.2';
+const VERSION = '1.3.3';
 
 const DEFAULTS = {
     enabled: true,
@@ -513,6 +513,10 @@ function noteFace(name, ref) {
 
 const REF_TYPES = ['openrouter', 'gemini', 'naistera'];
 
+function waitToast(sec, status) {
+    window.toastr?.info(status === 429 ? `Сервис просит не так часто — жду ${sec} с и пробую снова` : `Сервис картинок сбоит — повтор через ${sec} с`, '👗 Гардероб', { timeOut: Math.min(sec, 8) * 1000 });
+}
+
 /** Нарисовать картинку вещи шкафа. ref — фото-образец (data:URL), по нему рисуется именно эта вещь. */
 async function drawItem(id, { ref = '' } = {}) {
     const s = settings();
@@ -533,9 +537,9 @@ async function drawItem(id, { ref = '' } = {}) {
         const prompt = itemPrompt(it, s, { personRef: !!person, photoRef: !!(ref && canRef) });
         let out;
         try {
-            out = await generateImage(conn, prompt, refs, { aspect: styleHasPerson(s, it.slot) ? '4:3' : '1:1' });
+            out = await generateImage(conn, prompt, refs, { aspect: styleHasPerson(s, it.slot) ? '4:3' : '1:1', onWait: waitToast });
         } catch (e) {
-            if (person && (e?.status >= 500 || /moderat|safety|celebr|policy|blocked/i.test(String(e?.message)))) {
+            if (person && e?.status !== 429 && (e?.status >= 500 || /moderat|safety|celebr|policy|blocked/i.test(String(e?.message)))) {
                 e.message += `\n\nПохоже, сервис отказался рисовать по лицу «${who}» (${face?.from}). Grok и Nano Banana часто блокируют лица реальных актёров. Варианты: загрузи для ${shortName(who)} арт-лицо (рисованное, не фото актёра) через ⋮ → «Лицо для картинок», или смени «Модель Naistera для вещей» в ⚙.`;
             }
             throw e;
@@ -581,9 +585,9 @@ async function drawSet(id) {
         const refs = [person, ...itemRefs].filter(Boolean);
         let out;
         try {
-            out = await generateImage(conn, setPrompt(set, its, s, { itemRefs: itemRefs.length > 0, personRef: !!person }), refs, { aspect: styleHasPerson(s) ? '4:3' : '1:1' });
+            out = await generateImage(conn, setPrompt(set, its, s, { itemRefs: itemRefs.length > 0, personRef: !!person }), refs, { aspect: styleHasPerson(s) ? '4:3' : '1:1', onWait: waitToast });
         } catch (e) {
-            if (person && (e?.status >= 500 || /moderat|safety|celebr|policy|blocked/i.test(String(e?.message)))) {
+            if (person && e?.status !== 429 && (e?.status >= 500 || /moderat|safety|celebr|policy|blocked/i.test(String(e?.message)))) {
                 e.message += `\n\nПохоже, сервис отказался рисовать по лицу «${who}» (${face?.from}). Grok и Nano Banana часто блокируют лица реальных актёров — загрузи арт-лицо через ⋮ → «Лицо для картинок» или смени модель в ⚙.`;
             }
             throw e;
@@ -610,6 +614,8 @@ async function runDrawQueue() {
         while (drawQ.length && !drawStop) {
             const job = drawQ.shift();
             try {
+                if (done > 0) await new Promise(r => setTimeout(r, imgConnection().apiType === 'naistera' ? 5000 : 1500)); // не долбим сервис
+                if (drawStop) break;
                 if (job.kind === 'set') await drawSet(job.id);
                 else await drawItem(job.id, job);
                 done++;

@@ -181,12 +181,15 @@ async function fail(r, who) {
     let msg = raw;
     try {
         const j = JSON.parse(raw);
-        msg = typeof j.error === 'string' ? j.error : (j.error?.message || j.message || raw);
+        msg = typeof j.error === 'string' ? j.error : (j.error?.message || j.detail || j.message || raw);
+        if (typeof msg === 'object') msg = JSON.stringify(msg);
     } catch { /* не JSON */ }
     const hint = r.status === 401 || r.status === 403 ? ' — ключ/токен не принят: проверь его в настройках (или впиши свой в ⚙ гардероба)'
-        : r.status >= 500 ? ' — сервис картинок не справился' : '';
+        : r.status === 429 ? ' — слишком часто, сервис просит подождать'
+            : r.status >= 500 ? ' — сервис картинок не справился' : '';
     const err = new Error(`${who} ${r.status}${hint}: ${String(msg).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300)}`);
     err.status = r.status;
+    err.retryAfter = Number(r.headers?.get?.('retry-after')) || 0;
     throw err;
 }
 
@@ -205,8 +208,11 @@ export async function generateImage(conn, prompt, refs = [], opts = {}) {
             return await generateImageOnce(conn, prompt, refs, opts);
         } catch (e) {
             last = e;
-            if (!(e?.status === 429 || e?.status >= 500)) throw e;
-            await new Promise(r => setTimeout(r, 4000 * (attempt + 1)));
+            if (!(e?.status === 429 || e?.status >= 500) || attempt === 2) throw e;
+            // лимит частоты: ждём, сколько просит сервис (или 20 и 40 секунд); сбой сервера — 4 и 8 секунд
+            const wait = e.status === 429 ? Math.min(90, e.retryAfter || 20 * (attempt + 1)) * 1000 : 4000 * (attempt + 1);
+            opts.onWait?.(Math.round(wait / 1000), e.status);
+            await new Promise(r => setTimeout(r, wait));
         }
     }
     throw last;
