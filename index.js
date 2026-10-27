@@ -12,7 +12,7 @@ import {
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.0.2';
+const VERSION = '1.0.3';
 
 const DEFAULTS = {
     enabled: true,
@@ -790,7 +790,7 @@ async function onClick(ev) {
     const name = el.dataset.name;
 
     switch (act) {
-        case 'close': closePanel(); break;
+        case 'close': closePanel('кнопка ✕'); break;
         case 'tab': ui.tab = el.dataset.tab; closeModal(); render(); break;
         case 'who': ui.who = name; render(); break;
         case 'modal-close': closeModal(); break;
@@ -1067,7 +1067,7 @@ function buildPanel() {
     // а не «призрачный» клик от тапа по кнопке, которым плашку только что открыли (iOS)
     let downOnBack = false;
     back.addEventListener('pointerdown', () => { downOnBack = Date.now() - openedAt > 450; });
-    back.addEventListener('click', () => { if (downOnBack) closePanel(); downOnBack = false; });
+    back.addEventListener('click', () => { if (downOnBack) closePanel('тап по фону'); downOnBack = false; });
     const panel = document.createElement('div');
     panel.id = 'wd-panel';
     panel.innerHTML = `
@@ -1096,7 +1096,7 @@ function buildPanel() {
     for (const h of [head, headBar]) {
         h.addEventListener('touchstart', e => { y0 = Date.now() - openedAt > 450 ? e.touches[0].clientY : null; }, { passive: true });
         h.addEventListener('touchend', e => {
-            if (y0 !== null && e.changedTouches[0].clientY - y0 > 70) closePanel();
+            if (y0 !== null && e.changedTouches[0].clientY - y0 > 70) closePanel('свайп вниз');
             y0 = null;
         }, { passive: true });
     }
@@ -1120,9 +1120,51 @@ function openPanel(tab) {
         document.getElementById('wd-backdrop')?.classList.add('on');
         document.getElementById('wd-panel')?.classList.add('on');
     }));
+    if (settings().debug !== false) diagnoseOpen();
 }
 
-function closePanel() {
+/** Через 1,5 с после открытия: если плашки не видно — сказать почему (для отладки на телефоне). */
+function diagnoseOpen() {
+    const t0 = openedAt;
+    closeReason = '';
+    const panel = document.getElementById('wd-panel');
+    const events = [];
+    const mo = panel ? new MutationObserver(ms => {
+        for (const m of ms) {
+            if (m.type === 'attributes') events.push(`${m.attributeName}="${String(panel.getAttribute(m.attributeName) || '').slice(0, 60)}" @${Date.now() - t0}мс`);
+        }
+    }) : null;
+    mo?.observe(panel, { attributes: true, attributeFilter: ['class', 'style', 'hidden'] });
+    const removed = new MutationObserver(() => { if (panel && !panel.isConnected) events.push(`плашку удалили из страницы @${Date.now() - t0}мс`); });
+    removed.observe(document.body, { childList: true });
+    setTimeout(() => {
+        mo?.disconnect();
+        removed.disconnect();
+        if (!panel || openedAt !== t0) return;
+        const r = panel.getBoundingClientRect();
+        const cs = getComputedStyle(panel);
+        const shown = panel.isConnected && panel.classList.contains('on') && cs.display !== 'none' && cs.visibility !== 'hidden' && Number(cs.opacity) > 0.1 && r.top < window.innerHeight - 40 && r.height > 40;
+        let top = '';
+        if (shown) {
+            const el = document.elementFromPoint(window.innerWidth / 2, Math.min(window.innerHeight - 20, r.top + Math.min(r.height / 2, 200)));
+            if (el && !panel.contains(el)) top = `${el.tagName.toLowerCase()}${el.id ? '#' + el.id : ''}${el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).slice(0, 3).join('.') : ''}`;
+        }
+        if (shown && !top) return; // всё хорошо
+        const msg = [
+            shown ? `плашка открыта, но её перекрывает: ${top}` : 'плашку не видно',
+            closeReason ? `закрыла сама: ${closeReason}` : 'closePanel не вызывался',
+            `класс: "${panel.className}", display:${cs.display}, opacity:${cs.opacity}, transform:${cs.transform.slice(0, 40)}`,
+            `rect: top ${Math.round(r.top)} h ${Math.round(r.height)} / окно ${window.innerHeight}`,
+            ...events.slice(0, 6),
+        ].join('<br>');
+        window.toastr?.warning(esc(msg).replace(/&lt;br&gt;/g, '<br>'), `👗 Гардероб ${VERSION}: диагностика`, { timeOut: 0, extendedTimeOut: 0, closeButton: true, escapeHtml: false });
+    }, 1500);
+}
+
+let closeReason = '';
+
+function closePanel(reason = 'неизвестно') {
+    closeReason = `${typeof reason === 'string' ? reason : 'клик'} через ${Date.now() - openedAt} мс`;
     ui.open = false;
     closeModal();
     document.getElementById('wd-backdrop')?.classList.remove('on');
@@ -1131,7 +1173,7 @@ function closePanel() {
 
 function togglePanel() {
     const shown = document.getElementById('wd-panel')?.classList.contains('on');
-    if (shown && Date.now() - openedAt > 450) closePanel(); else if (!shown) openPanel();
+    if (shown && Date.now() - openedAt > 450) closePanel('кнопка 👗'); else if (!shown) openPanel();
 }
 
 function syncFab() {
