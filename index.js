@@ -9,10 +9,11 @@ import {
     CLOTHES_RE, entryFromItem, newEntry, sortBySlot, buildInjection,
     WATCHER_SYSTEM, buildWatcherInput, applyChanges, ANALYZE_SYSTEM, parseAnalyzed, parseAliases,
 } from './core.js';
+import { STYLES, DEFAULT_MODELS, resolveConnection, generateImage, itemPrompt, setPrompt } from './draw.js';
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.0.5';
+const VERSION = '1.1.0';
 
 const DEFAULTS = {
     enabled: true,
@@ -28,6 +29,13 @@ const DEFAULTS = {
     fabPos: null,
     watcherTokens: 1500,
     timeoutSec: 60,
+    imgSource: 'silly',
+    imgProvider: 'openrouter',
+    imgKey: '',
+    imgModel: '',
+    imgStyle: 'sketch',
+    imgStyleCustom: '',
+    autoDraw: true,
     aliases: 'Bucky Barnes = Баки, Барнс, Джеймс\nNatasha Romanoff = Наташа, Нат, Романофф\nТони Старк = Тони, Старк, Tony',
     items: [],
     sets: [],
@@ -364,6 +372,155 @@ async function analyzeOutfit({ text = '', dataUrl = '' }) {
     return items;
 }
 
+// ───────────── картинки вещей ─────────────
+
+const drawing = new Set();   // id вещей и комплектов, которые сейчас рисуются
+const drawQ = [];
+let drawBusy = false;
+let drawStop = false;
+
+async function urlToDataUrl(u) {
+    if (String(u).startsWith('data:')) return u;
+    const r = await fetch(u);
+    if (!r.ok) throw new Error(`картинка не скачалась (${r.status})`);
+    const blob = await r.blob();
+    return await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(fr.result);
+        fr.onerror = () => rej(new Error('картинка не прочиталась'));
+        fr.readAsDataURL(blob);
+    });
+}
+
+async function toJpeg(dataUrl, max = 768, q = 0.88) {
+    const img = await new Promise((res, rej) => {
+        const i = new Image();
+        i.onload = () => res(i);
+        i.onerror = () => rej(new Error('битая картинка'));
+        i.src = dataUrl;
+    });
+    const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+    const cv = document.createElement('canvas');
+    cv.width = Math.round(img.naturalWidth * k);
+    cv.height = Math.round(img.naturalHeight * k);
+    const g = cv.getContext('2d');
+    g.fillStyle = '#fff';
+    g.fillRect(0, 0, cv.width, cv.height);
+    g.drawImage(img, 0, 0, cv.width, cv.height);
+    return cv.toDataURL('image/jpeg', q);
+}
+
+function imgConnection() {
+    return resolveConnection(settings(), ctx().extensionSettings);
+}
+
+function canDraw() {
+    return !imgConnection().error;
+}
+
+/** Нарисовать картинку вещи шкафа. ref — фото-образец (data:URL), по нему рисуется именно эта вещь. */
+async function drawItem(id, { ref = '' } = {}) {
+    const s = settings();
+    const it = closetItem(id);
+    if (!it) return;
+    const conn = imgConnection();
+    if (conn.error) throw new Error(conn.error);
+    drawing.add(id);
+    paintDrawing();
+    try {
+        const refs = ref && ['openrouter', 'gemini'].includes(conn.apiType) ? [ref] : [];
+        let prompt = itemPrompt(it, s);
+        if (refs.length) prompt += '\nThe attached photo shows the real item (maybe as part of a whole outfit): draw ONLY this item from it, keeping its exact colour, fabric and details.';
+        const out = await generateImage(conn, prompt, refs);
+        const path = await uploadImage(await toJpeg(await urlToDataUrl(out)));
+        it.img = path;
+        it.drawn = true;
+        const w = chatState();
+        for (const st of Object.values(w?.chars || {})) {
+            for (const e of [...(st?.worn || []), ...(st?.off || [])]) if (e.itemId === id) e.img = path;
+        }
+        saveSettings();
+        saveChat();
+    } finally {
+        drawing.delete(id);
+        paintDrawing();
+    }
+}
+
+async function drawSet(id) {
+    const s = settings();
+    const set = s.sets.find(x => x.id === id);
+    if (!set) return;
+    const conn = imgConnection();
+    if (conn.error) throw new Error(conn.error);
+    const its = set.itemIds.map(closetItem).filter(Boolean);
+    if (!its.length) throw new Error('в комплекте нет вещей');
+    drawing.add(id);
+    paintDrawing();
+    try {
+        const refs = [];
+        if (['openrouter', 'gemini'].includes(conn.apiType)) {
+            for (const it of its.filter(x => x.img).slice(0, 6)) {
+                try { refs.push(await toJpeg(await urlToDataUrl(it.img), 512, 0.85)); } catch { /* без этой картинки */ }
+            }
+        }
+        const out = await generateImage(conn, setPrompt(set, its, s, refs.length > 0), refs);
+        set.img = await uploadImage(await toJpeg(await urlToDataUrl(out), 1024));
+        saveSettings();
+    } finally {
+        drawing.delete(id);
+        paintDrawing();
+    }
+}
+
+/** Очередь рисования: по одной картинке, на первой ошибке стоп (чтобы не жечь деньги). */
+function queueDraw(jobs) {
+    drawQ.push(...jobs);
+    if (!drawBusy) runDrawQueue();
+}
+
+async function runDrawQueue() {
+    drawBusy = true;
+    drawStop = false;
+    let done = 0;
+    try {
+        while (drawQ.length && !drawStop) {
+            const job = drawQ.shift();
+            try {
+                if (job.kind === 'set') await drawSet(job.id);
+                else await drawItem(job.id, job);
+                done++;
+            } catch (e) {
+                console.warn('[Гардероб] рисование', e);
+                window.toastr?.warning(esc(String(e.message || e)), '👗 Гардероб: картинка не нарисовалась', { timeOut: 8000 });
+                drawQ.length = 0;
+            }
+        }
+    } finally {
+        drawBusy = false;
+        drawQ.length = 0;
+        render();
+        if (done > 1) window.toastr?.success(`Нарисовано: ${done}`, '👗 Гардероб', { timeOut: 2500 });
+    }
+}
+
+/** Точечно обновить картинки/спиннеры, не перерисовывая всю плашку (модалка не закрывается). */
+function paintDrawing() {
+    document.querySelectorAll('#wd-panel [data-draw-id]').forEach(el => {
+        const id = el.dataset.drawId;
+        el.classList.toggle('wd-drawing', drawing.has(id));
+        const obj = closetItem(id) || settings().sets.find(x => x.id === id);
+        const img = el.querySelector('img');
+        if (obj?.img && (!img || img.getAttribute('src') !== obj.img)) {
+            el.querySelector('span')?.remove();
+            if (img) img.src = obj.img;
+            else el.insertAdjacentHTML('afterbegin', `<img src="${esc(obj.img)}" alt="" loading="lazy">`);
+        }
+    });
+    const stop = document.querySelector('#wd-panel [data-act="draw-stop"]');
+    if (stop && !drawBusy) render();
+}
+
 // ───────────── операции ─────────────
 
 function closetItem(id) { return settings().items.find(x => x.id === id); }
@@ -412,7 +569,8 @@ function profileOptions(selected, empty = '— выбери профиль —')
 
 function thumb(e, cls = 'wd-thumb') {
     const sl = slotOf(e.slot);
-    return `<div class="${cls}" data-slot="${esc(sl.k)}">${e.img ? `<img src="${esc(e.img)}" alt="" loading="lazy">` : `<span>${sl.i}</span>`}</div>`;
+    const did = e.itemId || e.id || '';
+    return `<div class="${cls}${drawing.has(did) ? ' wd-drawing' : ''}" data-slot="${esc(sl.k)}" data-draw-id="${esc(did)}">${e.img ? `<img src="${esc(e.img)}" alt="" loading="lazy">` : `<span>${sl.i}</span>`}</div>`;
 }
 
 function avatar(name, size = '') {
@@ -534,8 +692,13 @@ function itemCard(it, act = 'item-menu') {
 
 function renderCloset() {
     const items = filteredItems();
+    const missing = settings().items.filter(it => !it.img).length;
+    const drawBtn = drawBusy
+        ? `<button class="wd-btn danger" data-act="draw-stop"><i class="fa-solid fa-stop"></i> Стоп (${drawQ.length + 1})</button>`
+        : missing ? `<button class="wd-btn" data-act="draw-missing"><i class="fa-solid fa-palette"></i> Дорисовать (${missing})</button>` : '';
     return `<div class="wd-actions-row">
         <button class="wd-btn primary" data-act="new-item"><i class="fa-solid fa-plus"></i> Новая вещь или образ</button>
+        ${drawBtn}
     </div>
     ${closetFilters()}
     ${items.length ? `<div class="wd-grid">${items.map(it => itemCard(it)).join('')}</div>`
@@ -554,6 +717,7 @@ function renderSets() {
                 <div><div class="wd-set-name">${esc(set.name)}</div><div class="wd-row-meta">${its.length} ${plural(its.length, 'вещь', 'вещи', 'вещей')}${set.owner ? ` · ${esc(set.owner)}` : ''}</div></div>
                 <button class="wd-dots" data-act="set-menu" data-id="${esc(set.id)}"><i class="fa-solid fa-ellipsis"></i></button>
             </div>
+            ${set.img || drawing.has(set.id) ? `<div class="wd-set-cover${drawing.has(set.id) ? ' wd-drawing' : ''}" data-draw-id="${esc(set.id)}">${set.img ? `<img src="${esc(set.img)}" alt="" loading="lazy">` : '<span>🎨</span>'}</div>` : ''}
             <div class="wd-set-items">${its.map(it => `<div class="wd-set-item" title="${esc(it.name)}">${thumb(it, 'wd-set-thumb')}<span>${esc(cut(it.name, 26))}</span></div>`).join('')}</div>
             <button class="wd-btn primary full" data-act="set-wear" data-id="${esc(set.id)}"><i class="fa-solid fa-shirt"></i> Надеть на…</button>
         </div>`;
@@ -581,12 +745,42 @@ function renderCfg() {
         </div>
         <div class="wd-field"><label>Как персонажей зовут в тексте <small>(Имя карточки = прозвища через запятую)</small></label>
             <textarea rows="3" data-set="aliases">${esc(s.aliases)}</textarea></div>
+        ${imgSettings(s)}
         <div class="wd-actions-row">
             <button class="wd-btn" data-act="check-last"><i class="fa-solid fa-magnifying-glass"></i> Проверить последнее сообщение</button>
         </div>
         <div class="wd-field"><label>Что сейчас видит модель</label><pre class="wd-pre">${esc(preview || '— пусто: ни на ком ничего не записано —')}</pre></div>
         <div class="wd-foot">Гардероб ${VERSION} · <code>/wardrobe</code> открывает эту плашку</div>
     </div>`;
+}
+
+function imgSettings(s) {
+    const silly = ctx().extensionSettings?.inline_image_gen;
+    const slay = ctx().extensionSettings?.slay_image_gen;
+    const opts = [];
+    if (silly) {
+        opts.push(['silly', `sillyimages — текущее (${silly.apiType || '—'}${silly.model ? `: ${silly.model}` : ''})`]);
+        for (const p of silly.connectionProfiles || []) opts.push([p.id, `sillyimages — ${p.name} (${p.apiType})`]);
+    }
+    if (slay?.apiKey) opts.push(['slay', `SLAY Images — текущее (${slay.apiType || '—'}${slay.model ? `: ${slay.model}` : ''})`]);
+    opts.push(['own', 'свой ключ']);
+    const src = opts.some(o => o[0] === s.imgSource) ? s.imgSource : opts[0][0];
+    if (src !== s.imgSource) { s.imgSource = src; saveSettings(); }
+    const conn = imgConnection();
+    const own = src === 'own' ? `
+        <div class="wd-grid2">
+            <div class="wd-field"><label>Провайдер</label><select data-set="imgProvider">${[['openrouter', 'OpenRouter'], ['gemini', 'Gemini (Google)'], ['xai', 'xAI (Grok)'], ['openai', 'OpenAI']].map(([v, t]) => `<option value="${v}" ${v === s.imgProvider ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+            <div class="wd-field"><label>Модель</label><input type="text" data-set="imgModel" value="${esc(s.imgModel)}" placeholder="${esc(DEFAULT_MODELS[s.imgProvider] || '')}"></div>
+        </div>
+        <div class="wd-field"><label>API-ключ</label><input type="password" data-set="imgKey" value="${esc(s.imgKey)}" autocomplete="off"></div>` : '';
+    return `<div class="wd-sec">🎨 Картинки вещей</div>
+        <div class="wd-field"><label>Чем рисовать</label><select data-set="imgSource">${opts.map(([v, t]) => `<option value="${esc(v)}" ${v === src ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
+        ${own}
+        <div class="wd-field"><label>Стиль</label><select data-set="imgStyle">${Object.entries(STYLES).map(([k, v]) => `<option value="${k}" ${k === s.imgStyle ? 'selected' : ''}>${esc(v.t)}</option>`).join('')}<option value="custom" ${s.imgStyle === 'custom' ? 'selected' : ''}>Свой промпт стиля</option></select></div>
+        ${s.imgStyle === 'custom' ? `<div class="wd-field"><label>Промпт стиля (по-английски лучше)</label><textarea rows="3" data-set="imgStyleCustom">${esc(s.imgStyleCustom)}</textarea></div>` : ''}
+        <label class="wd-switch"><input type="checkbox" data-set="autoDraw" ${s.autoDraw ? 'checked' : ''}><span></span>Сразу рисовать новые вещи</label>
+        <div class="wd-hint-soft">${conn.error ? `⚠️ ${esc(conn.error)}` : `Рисую через ${esc(conn.apiType)} · ${esc(conn.model)}`}</div>
+        <div class="wd-sec">Прочее</div>`;
 }
 
 function render() {
@@ -660,7 +854,12 @@ function itemMenu(id) {
     const it = closetItem(id);
     if (!it) return;
     openModal(esc(it.name), `
-        ${it.img ? `<img class="wd-big-img" src="${esc(it.img)}" alt="">` : ''}
+        <div class="wd-big${drawing.has(it.id) ? ' wd-drawing' : ''}" data-draw-id="${esc(it.id)}">${it.img ? `<img src="${esc(it.img)}" alt="">` : `<span>${slotOf(it.slot).i}</span>`}</div>
+        <div class="wd-actions-row">
+            <button class="wd-btn primary" data-act="item-draw" data-id="${esc(it.id)}"><i class="fa-solid fa-palette"></i> ${it.img ? 'Перерисовать' : 'Нарисовать'}</button>
+            <label class="wd-btn"><i class="fa-solid fa-camera"></i> Своё фото<input type="file" accept="image/*" data-input="itemfile" data-id="${esc(it.id)}" hidden></label>
+            ${it.img ? `<button class="wd-btn" data-act="item-noimg" data-id="${esc(it.id)}"><i class="fa-solid fa-image"></i> Убрать</button>` : ''}
+        </div>
         <div class="wd-sec">Надеть на</div>
         ${personPicker('item-wear', `data-id="${esc(it.id)}"`)}
         <div class="wd-sec">Изменить</div>
@@ -707,6 +906,7 @@ function newItemModal({ wearOn = '' } = {}) {
             <div class="wd-field"><label>Чьё</label>${ownerSelect(wearOn || '', 'data-input="nowner"')}</div>
             <div class="wd-field"><label>Тип <small>(если без ИИ)</small></label>${slotSelect('top', 'data-input="nslot"')}</div>
         </div>
+        <label class="wd-switch"><input type="checkbox" data-input="ndraw" ${settings().autoDraw && canDraw() ? 'checked' : ''}><span></span>Нарисовать картинки новым вещам</label>
         <div class="wd-actions-row">
             <button class="wd-btn primary" data-act="n-analyze"><i class="fa-solid fa-wand-magic-sparkles"></i> Разложить на вещи (ИИ)</button>
             <button class="wd-btn" data-act="n-plain"><i class="fa-solid fa-plus"></i> Одной вещью, без ИИ</button>
@@ -948,7 +1148,9 @@ async function onClick(ev) {
             const owner = box.querySelector('[data-input="nowner"]').value;
             const it = addToCloset({ name: text, slot: box.querySelector('[data-input="nslot"]').value, img: d?.img || '', owner });
             if (d?.wearOn) wearItem(d.wearOn, it);
+            const drawIt = box.querySelector('[data-input="ndraw"]')?.checked && !d?.img;
             closeModal(); commit({ manual: !!d?.wearOn });
+            if (drawIt) queueDraw([{ id: it.id }]);
             break;
         }
         case 'n-save': {
@@ -958,6 +1160,9 @@ async function onClick(ev) {
             const owner = box.querySelector('[data-input="nowner"]').value;
             const who = d.wearOn || ui.who;
             const created = list.map(x => addToCloset({ name: x.name, slot: x.slot, desc: x.desc, img: d.img || '', owner }));
+            // одно фото одной вещи — оставляем фото; образ с фото — рисуем каждую вещь по этому фото; без фото — просто рисуем
+            const drawJobs = box.querySelector('[data-input="ndraw"]')?.checked && !(d.img && created.length === 1)
+                ? created.map(it => ({ id: it.id, ref: d.dataUrl || '' })) : [];
             if (el.dataset.wear && who) {
                 const st = charState(who);
                 // новый образ: то, что надето в тех же «ячейках» (верх, низ, обувь…), снимаем, потом надеваем всё новое
@@ -970,7 +1175,39 @@ async function onClick(ev) {
                 ui.tab = 'worn';
             }
             closeModal(); commit({ manual: !!el.dataset.wear });
-            window.toastr?.success(`${created.length} в шкафу`, '👗 Гардероб', { timeOut: 1500 });
+            window.toastr?.success(`${created.length} в шкафу${drawJobs.length ? ' — рисую картинки' : ''}`, '👗 Гардероб', { timeOut: 2000 });
+            if (drawJobs.length) queueDraw(drawJobs);
+            break;
+        }
+
+        case 'item-draw': {
+            const conn = imgConnection();
+            if (conn.error) { window.toastr?.warning(esc(conn.error), '👗 Гардероб', { timeOut: 7000 }); break; }
+            queueDraw([{ id }]);
+            break;
+        }
+        case 'item-noimg': {
+            const it = closetItem(id);
+            if (it) { it.img = ''; saveSettings(); }
+            closeModal(); render(); break;
+        }
+        case 'draw-missing': {
+            const conn = imgConnection();
+            if (conn.error) { window.toastr?.warning(esc(conn.error), '👗 Гардероб', { timeOut: 7000 }); break; }
+            const ids = s.items.filter(it => !it.img).map(it => it.id);
+            if (!ids.length) break;
+            if (!confirm(`Нарисовать ${ids.length} ${plural(ids.length, 'картинку', 'картинки', 'картинок')} через ${conn.apiType} (${conn.model})? Каждая — отдельный платный запрос.`)) break;
+            queueDraw(ids.map(i => ({ id: i })));
+            render();
+            break;
+        }
+        case 'draw-stop': { drawStop = true; drawQ.length = 0; window.toastr?.info('Дорисую текущую и остановлюсь', '👗 Гардероб', { timeOut: 2500 }); break; }
+        case 'set-draw': {
+            const conn = imgConnection();
+            if (conn.error) { window.toastr?.warning(esc(conn.error), '👗 Гардероб', { timeOut: 7000 }); break; }
+            closeModal();
+            queueDraw([{ kind: 'set', id }]);
+            render();
             break;
         }
 
@@ -990,6 +1227,7 @@ async function onClick(ev) {
             if (!set) break;
             openModal(esc(set.name), menuList([
                 ['set-edit', 'fa-pen', 'Изменить', `data-id="${esc(id)}"`],
+                ['set-draw', 'fa-palette', set.img ? 'Перерисовать обложку' : 'Нарисовать обложку', `data-id="${esc(id)}"`],
                 ['set-del', 'fa-trash', 'Удалить комплект', `data-id="${esc(id)}"`, true],
             ]));
             break;
@@ -1020,7 +1258,7 @@ async function onInput(ev) {
         s[k] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Math.max(0, parseInt(el.value) || 0) : el.value;
         saveSettings();
         if (k === 'showFab') syncFab();
-        if (['enabled', 'detail', 'depth'].includes(k) && ev.type === 'change') render();
+        if (['enabled', 'detail', 'depth', 'imgSource', 'imgStyle', 'imgProvider'].includes(k) && ev.type === 'change') render();
         else updateInjection();
         return;
     }
@@ -1037,6 +1275,25 @@ async function onInput(ev) {
             const it = closetItem(card.dataset.id);
             card.style.display = !q || norm(`${it?.name} ${it?.desc}`).includes(q) ? '' : 'none';
         });
+        return;
+    }
+    if (el.dataset.input === 'itemfile' && ev.type === 'change') {
+        const file = el.files?.[0];
+        const it = closetItem(el.dataset.id);
+        if (!file || !it) return;
+        drawing.add(it.id);
+        paintDrawing();
+        try {
+            it.img = await uploadImage(await fileToDataUrl(file, 1024));
+            it.drawn = false;
+            saveSettings();
+        } catch (e) {
+            window.toastr?.warning(esc(String(e.message || e)), '👗 Гардероб');
+        } finally {
+            drawing.delete(it.id);
+            paintDrawing();
+            render();
+        }
         return;
     }
     if (el.dataset.input === 'nfile' && ev.type === 'change') {
