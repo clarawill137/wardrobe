@@ -12,7 +12,7 @@ import {
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.0.3';
+const VERSION = '1.0.4';
 
 const DEFAULTS = {
     enabled: true,
