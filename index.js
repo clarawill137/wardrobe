@@ -13,7 +13,7 @@ import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, resolveConnection, generateIma
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.2.1';
+const VERSION = '1.3.0';
 
 const DEFAULTS = {
     enabled: true,
@@ -36,6 +36,7 @@ const DEFAULTS = {
     imgNaisteraModel: '',
     imgStyle: 'clover',
     imgOnPerson: 'owner',
+    faces: {},
     imgStyleCustom: '',
     autoDraw: true,
     aliases: 'Bucky Barnes = Баки, Барнс, Джеймс\nNatasha Romanoff = Наташа, Нат, Романофф\nТони Старк = Тони, Старк, Tony',
@@ -52,6 +53,7 @@ function settings() {
     for (const [k, v] of Object.entries(DEFAULTS)) if (s[k] === undefined) s[k] = clone(v);
     if (!Array.isArray(s.items)) s.items = [];
     if (!Array.isArray(s.sets)) s.sets = [];
+    if (!s.faces || typeof s.faces !== 'object') s.faces = {};
     if (!s.migr120) { if (s.imgStyle === 'sketch') s.imgStyle = 'clover'; s.migr120 = true; }
     if (!s.migr121) { if (!s.imgSource || s.imgSource === 'silly') s.imgSource = 'auto'; s.migr121 = true; }
     return s;
@@ -108,8 +110,12 @@ function castNames() {
     return names;
 }
 
-function avatarUrl(name) {
+function avatarUrl(name, { preferFace = false } = {}) {
     const c = ctx();
+    if (preferFace) {
+        const f = settings().faces?.[name];
+        if (f) return f;
+    }
     if (name === c.name1) {
         const img = document.querySelector('#chat .mes[is_user="true"] .avatar img');
         return img?.getAttribute('src') || '';
@@ -422,16 +428,39 @@ function canDraw() {
     return !imgConnection().error;
 }
 
-/** Картинка-образец лица персонажа: рефы sillyimages → рефы SLAY → аватарка карточки. */
+/**
+ * Лицо персонажа для картинок. Порядок: своё «Лицо для картинок» в гардеробе →
+ * сохранённые персонажи SLAY → рефы SLAY (по персонажам и общие) → лорбуки рефов sillyimages → аватарка.
+ * Возвращает { dataUrl, from } или null.
+ */
 async function personRefFor(name) {
-    if (!name) return '';
+    if (!name) return null;
     const c = ctx();
+    const s = settings();
     const ext = c.extensionSettings || {};
-    const al = parseAliases(settings().aliases);
+    const al = parseAliases(s.aliases);
     const cands = [name, String(name).split(/\s+/)[0], ...(al[name] || [])].map(norm).filter(Boolean);
-    const byNames = (raw) => String(raw || '').split(',').map(norm).filter(Boolean)
+    const byNames = (raw) => String(raw || '').split(/[,;|/]/).map(norm).filter(Boolean)
         .some(a => cands.some(x => x === a || x.startsWith(a) || a.startsWith(x)));
-    const paths = [];
+    const found = [];
+    const add = (path, from) => { if (path) found.push({ path, from }); };
+
+    add(s.faces?.[name], 'лицо из гардероба');
+
+    const sl = ext.slay_image_gen || {};
+    for (const ch of Array.isArray(sl.savedChars) ? sl.savedChars : []) {
+        if (byNames(ch?.names)) add(ch.looks?.[0]?.path, 'персонажи SLAY');
+    }
+    const refSlots = (refs, owner) => {
+        if (!refs) return;
+        // в SLAY пустое имя у {{char}} = имя карточки, у {{user}} = твоя персона
+        if (refs.charRef?.imagePath && (byNames(refs.charRef.name) || (!refs.charRef.name && owner && byNames(owner)))) add(refs.charRef.imagePath, 'рефы SLAY');
+        if (refs.userRef?.imagePath && (byNames(refs.userRef.name) || (!refs.userRef.name && name === c.name1))) add(refs.userRef.imagePath, 'рефы SLAY');
+        for (const n of refs.npcReferences || []) if (n?.imagePath && byNames(n.name)) add(n.imagePath, 'рефы SLAY (NPC)');
+    };
+    for (const [owner, refs] of Object.entries(sl.perCharacterRefs || {})) refSlots(refs, owner);
+    refSlots(sl, '');
+
     for (const lb of ext.inline_image_gen?.lorebooks || []) {
         if (lb?.enabled === false) continue;
         for (const r of lb.refs || []) {
@@ -444,27 +473,42 @@ async function personRefFor(name) {
                     ok = re.test(name) || cands.some(x => re.test(x));
                 } catch { ok = false; }
             } else ok = byNames(r.name);
-            if (ok) paths.push(r.imagePath);
+            if (ok) add(r.imagePath, 'рефы sillyimages');
         }
     }
-    const sl = ext.slay_image_gen;
-    for (const r of [sl?.charRef, sl?.userRef, ...(sl?.npcReferences || [])]) {
-        if (r?.imagePath && byNames(r.name)) paths.push(r.imagePath);
-    }
+
     const ch = (c.characters || []).find(x => x.name === name);
-    if (ch?.avatar) paths.push(`/characters/${encodeURIComponent(ch.avatar)}`);
+    if (ch?.avatar) add(`/characters/${encodeURIComponent(ch.avatar)}`, 'аватарка карточки');
     else if (name === c.name1) {
         const t = avatarUrl(name);
         let f = '';
         try { f = t ? new URL(t, location.href).searchParams.get('file') || '' : ''; } catch { f = ''; }
-        if (f) paths.push(`/User Avatars/${encodeURIComponent(f)}`);
-        else if (t) paths.push(t);
+        if (f) add(`/User Avatars/${encodeURIComponent(f)}`, 'аватарка персоны');
+        else if (t) add(t, 'аватарка персоны');
     }
-    for (const p of paths) {
-        const u = /^(\/|https?:|data:)/.test(p) ? p : `/${p}`;
-        try { return await toJpeg(await urlToDataUrl(u), 768, 0.86); } catch { /* следующий */ }
+
+    for (const { path, from } of found) {
+        const u = /^(\/|https?:|data:)/.test(path) ? path : `/${path}`;
+        try { return { dataUrl: await toJpeg(await urlToDataUrl(u), 768, 0.86), from }; } catch { /* следующий */ }
     }
-    return '';
+    return null;
+}
+
+/** Чья вещь: владелец, а если «общее» — тот, кто носит её в этом чате, или открытый в плашке персонаж. */
+function itemWearer(it) {
+    if (it?.owner) return it.owner;
+    const w = chatState();
+    for (const [name, st] of Object.entries(w?.chars || {})) {
+        if ([...(st?.worn || []), ...(st?.off || [])].some(e => e.itemId === it.id)) return name;
+    }
+    return ui.tab === 'worn' ? ui.who : '';
+}
+
+let faceWarned = new Set();
+function noteFace(name, ref) {
+    if (ref || !name || faceWarned.has(name)) return;
+    faceWarned.add(name);
+    window.toastr?.info(`Не нашла лицо для «${esc(name)}» — нарисовала на модели. Загрузи: «На них» → ${esc(shortName(name))} → ⋮ → Лицо для картинок.`, '👗 Гардероб', { timeOut: 9000 });
 }
 
 const REF_TYPES = ['openrouter', 'gemini', 'naistera'];
@@ -480,7 +524,11 @@ async function drawItem(id, { ref = '' } = {}) {
     paintDrawing();
     try {
         const canRef = REF_TYPES.includes(conn.apiType);
-        const person = canRef && s.imgOnPerson !== 'model' && styleHasPerson(s, it.slot) ? await personRefFor(it.owner) : '';
+        const wantFace = canRef && s.imgOnPerson !== 'model' && styleHasPerson(s, it.slot);
+        const who = wantFace ? itemWearer(it) : '';
+        const face = wantFace ? await personRefFor(who) : null;
+        if (wantFace) noteFace(who, face);
+        const person = face?.dataUrl || '';
         const refs = [person, canRef ? ref : ''].filter(Boolean);
         const prompt = itemPrompt(it, s, { personRef: !!person, photoRef: !!(ref && canRef) });
         const out = await generateImage(conn, prompt, refs, { aspect: styleHasPerson(s, it.slot) ? '4:3' : '1:1' });
@@ -511,7 +559,11 @@ async function drawSet(id) {
     paintDrawing();
     try {
         const canRef = REF_TYPES.includes(conn.apiType);
-        const person = canRef && s.imgOnPerson !== 'model' && styleHasPerson(s) ? await personRefFor(set.owner) : '';
+        const wantFace = canRef && s.imgOnPerson !== 'model' && styleHasPerson(s);
+        const who = set.owner || (ui.tab === 'worn' ? ui.who : '');
+        const face = wantFace ? await personRefFor(who) : null;
+        if (wantFace) noteFace(who, face);
+        const person = face?.dataUrl || '';
         const itemRefs = [];
         if (canRef) {
             for (const it of its.filter(x => x.img).slice(0, person ? 4 : 5)) {
@@ -629,7 +681,7 @@ function thumb(e, cls = 'wd-thumb') {
 }
 
 function avatar(name, size = '') {
-    const url = avatarUrl(name);
+    const url = avatarUrl(name, { preferFace: true });
     const letter = esc((name || '?').trim().charAt(0).toUpperCase());
     return `<div class="wd-ava ${size}">${url ? `<img src="${esc(url)}" alt="" onerror="this.remove()">` : ''}<span>${letter}</span></div>`;
 }
@@ -1069,6 +1121,7 @@ async function onClick(ev) {
         case 'who-menu': {
             const w = chatState();
             openModal(esc(ui.who), menuList([
+                ['face', 'fa-face-smile', s.faces[ui.who] ? 'Лицо для картинок (заменить)' : 'Лицо для картинок'],
                 ['strip', 'fa-person', 'Раздеть (всё снять)'],
                 ['wear-off-all', 'fa-arrow-up', 'Надеть обратно всё снятое'],
                 ['save-as-set', 'fa-layer-group', 'Сохранить надетое как комплект'],
@@ -1077,6 +1130,18 @@ async function onClick(ev) {
             ]));
             break;
         }
+        case 'face': {
+            const cur = s.faces[ui.who];
+            openModal(`Лицо: ${esc(shortName(ui.who))}`, `
+                <div class="wd-hint-soft">Это фото гардероб прикладывает, когда рисует вещи «на человеке» (лукбук, причёски, макияж). Лучше всего — лицо крупно, ровный свет, без других людей.</div>
+                <div class="wd-big" data-face="${esc(ui.who)}">${cur ? `<img src="${esc(cur)}" alt="">` : '<span>🙂</span>'}</div>
+                <div class="wd-actions-row">
+                    <label class="wd-btn primary"><i class="fa-solid fa-camera"></i> ${cur ? 'Заменить фото' : 'Загрузить фото'}<input type="file" accept="image/*" data-input="facefile" hidden></label>
+                    ${cur ? '<button class="wd-btn danger" data-act="face-del"><i class="fa-solid fa-trash"></i> Убрать</button>' : ''}
+                </div>`);
+            break;
+        }
+        case 'face-del': { delete s.faces[ui.who]; saveSettings(); closeModal(); render(); break; }
         case 'strip': { const st = charState(ui.who); st.off.push(...st.worn); st.worn = []; closeModal(); commit(); break; }
         case 'wear-off-all': { const st = charState(ui.who); st.worn.push(...st.off); st.off = []; closeModal(); commit(); break; }
         case 'wipe-who': { const st = charState(ui.who); st.worn = []; st.off = []; closeModal(); commit(); break; }
@@ -1335,6 +1400,28 @@ async function onInput(ev) {
             const it = closetItem(card.dataset.id);
             card.style.display = !q || norm(`${it?.name} ${it?.desc}`).includes(q) ? '' : 'none';
         });
+        return;
+    }
+    if (el.dataset.input === 'facefile' && ev.type === 'change') {
+        const file = el.files?.[0];
+        const who = ui.who;
+        if (!file || !who) return;
+        const box = el.closest('.wd-modal');
+        const big = box?.querySelector('.wd-big');
+        if (big) big.classList.add('wd-drawing');
+        try {
+            const path = await uploadImage(await fileToDataUrl(file, 1024));
+            s.faces[who] = path;
+            faceWarned.delete(who);
+            saveSettings();
+            if (big) big.innerHTML = `<img src="${esc(path)}" alt="">`;
+            render();
+            window.toastr?.success(`Лицо ${esc(shortName(who))} сохранено`, '👗 Гардероб', { timeOut: 2000 });
+        } catch (e) {
+            window.toastr?.warning(esc(String(e.message || e)), '👗 Гардероб');
+        } finally {
+            big?.classList.remove('wd-drawing');
+        }
         return;
     }
     if (el.dataset.input === 'itemfile' && ev.type === 'change') {
