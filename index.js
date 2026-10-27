@@ -5,15 +5,15 @@
 // и обновляет трекер. На свайпах и удалениях изменения откатываются.
 
 import {
-    SLOTS, slotOf, normSlot, uid, esc, cut, norm, clone, cleanText, extractJson,
+    SLOTS, slotOf, normSlot, isLook, uid, esc, cut, norm, clone, cleanText, extractJson,
     CLOTHES_RE, entryFromItem, newEntry, sortBySlot, buildInjection,
     WATCHER_SYSTEM, buildWatcherInput, applyChanges, ANALYZE_SYSTEM, parseAnalyzed, parseAliases,
 } from './core.js';
-import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, resolveConnection, generateImage, itemPrompt, setPrompt } from './draw.js';
+import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, resolveConnection, generateImage, itemPrompt, setPrompt, styleHasPerson } from './draw.js';
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.1.1';
+const VERSION = '1.2.0';
 
 const DEFAULTS = {
     enabled: true,
@@ -34,7 +34,8 @@ const DEFAULTS = {
     imgKey: '',
     imgModel: '',
     imgNaisteraModel: '',
-    imgStyle: 'sketch',
+    imgStyle: 'clover',
+    imgOnPerson: 'owner',
     imgStyleCustom: '',
     autoDraw: true,
     aliases: 'Bucky Barnes = Баки, Барнс, Джеймс\nNatasha Romanoff = Наташа, Нат, Романофф\nТони Старк = Тони, Старк, Tony',
@@ -51,6 +52,7 @@ function settings() {
     for (const [k, v] of Object.entries(DEFAULTS)) if (s[k] === undefined) s[k] = clone(v);
     if (!Array.isArray(s.items)) s.items = [];
     if (!Array.isArray(s.sets)) s.sets = [];
+    if (!s.migr120) { if (s.imgStyle === 'sketch') s.imgStyle = 'clover'; s.migr120 = true; }
     return s;
 }
 const saveSettings = () => ctx().saveSettingsDebounced();
@@ -354,7 +356,7 @@ async function uploadImage(dataUrl) {
         headers: ctx().getRequestHeaders(),
         body: JSON.stringify({ image: dataUrl.split(',')[1], format: 'jpg', ch_name: 'wardrobe', filename: `wd_${Date.now()}` }),
     });
-    if (!r.ok) throw new Error(`картинка не загрузилась (${r.status})`);
+    if (!r.ok) throw new Error(`таверна не приняла картинку на сохранение (${r.status})`);
     const j = await r.json();
     const p = String(j.path || '');
     return p.startsWith('/') ? p : `/${p}`;
@@ -419,6 +421,53 @@ function canDraw() {
     return !imgConnection().error;
 }
 
+/** Картинка-образец лица персонажа: рефы sillyimages → рефы SLAY → аватарка карточки. */
+async function personRefFor(name) {
+    if (!name) return '';
+    const c = ctx();
+    const ext = c.extensionSettings || {};
+    const al = parseAliases(settings().aliases);
+    const cands = [name, String(name).split(/\s+/)[0], ...(al[name] || [])].map(norm).filter(Boolean);
+    const byNames = (raw) => String(raw || '').split(',').map(norm).filter(Boolean)
+        .some(a => cands.some(x => x === a || x.startsWith(a) || a.startsWith(x)));
+    const paths = [];
+    for (const lb of ext.inline_image_gen?.lorebooks || []) {
+        if (lb?.enabled === false) continue;
+        for (const r of lb.refs || []) {
+            if (!r || r.enabled === false || !r.imagePath) continue;
+            let ok = false;
+            if (r.useRegex) {
+                try {
+                    const m = String(r.name).match(/^\/(.+)\/([a-z]*)$/);
+                    const re = m ? new RegExp(m[1], m[2] || 'iu') : new RegExp(String(r.name), 'iu');
+                    ok = re.test(name) || cands.some(x => re.test(x));
+                } catch { ok = false; }
+            } else ok = byNames(r.name);
+            if (ok) paths.push(r.imagePath);
+        }
+    }
+    const sl = ext.slay_image_gen;
+    for (const r of [sl?.charRef, sl?.userRef, ...(sl?.npcReferences || [])]) {
+        if (r?.imagePath && byNames(r.name)) paths.push(r.imagePath);
+    }
+    const ch = (c.characters || []).find(x => x.name === name);
+    if (ch?.avatar) paths.push(`/characters/${encodeURIComponent(ch.avatar)}`);
+    else if (name === c.name1) {
+        const t = avatarUrl(name);
+        let f = '';
+        try { f = t ? new URL(t, location.href).searchParams.get('file') || '' : ''; } catch { f = ''; }
+        if (f) paths.push(`/User Avatars/${encodeURIComponent(f)}`);
+        else if (t) paths.push(t);
+    }
+    for (const p of paths) {
+        const u = /^(\/|https?:|data:)/.test(p) ? p : `/${p}`;
+        try { return await toJpeg(await urlToDataUrl(u), 768, 0.86); } catch { /* следующий */ }
+    }
+    return '';
+}
+
+const REF_TYPES = ['openrouter', 'gemini', 'naistera'];
+
 /** Нарисовать картинку вещи шкафа. ref — фото-образец (data:URL), по нему рисуется именно эта вещь. */
 async function drawItem(id, { ref = '' } = {}) {
     const s = settings();
@@ -429,10 +478,11 @@ async function drawItem(id, { ref = '' } = {}) {
     drawing.add(id);
     paintDrawing();
     try {
-        const refs = ref && ['openrouter', 'gemini', 'naistera'].includes(conn.apiType) ? [ref] : [];
-        let prompt = itemPrompt(it, s);
-        if (refs.length) prompt += '\nThe attached photo shows the real item (maybe as part of a whole outfit): draw ONLY this item from it, keeping its exact colour, fabric and details.';
-        const out = await generateImage(conn, prompt, refs);
+        const canRef = REF_TYPES.includes(conn.apiType);
+        const person = canRef && s.imgOnPerson !== 'model' && styleHasPerson(s, it.slot) ? await personRefFor(it.owner) : '';
+        const refs = [person, canRef ? ref : ''].filter(Boolean);
+        const prompt = itemPrompt(it, s, { personRef: !!person, photoRef: !!(ref && canRef) });
+        const out = await generateImage(conn, prompt, refs, { aspect: styleHasPerson(s, it.slot) ? '4:3' : '1:1' });
         const path = await uploadImage(await toJpeg(await urlToDataUrl(out)));
         it.img = path;
         it.drawn = true;
@@ -459,13 +509,16 @@ async function drawSet(id) {
     drawing.add(id);
     paintDrawing();
     try {
-        const refs = [];
-        if (['openrouter', 'gemini', 'naistera'].includes(conn.apiType)) {
-            for (const it of its.filter(x => x.img).slice(0, 6)) {
-                try { refs.push(await toJpeg(await urlToDataUrl(it.img), 512, 0.85)); } catch { /* без этой картинки */ }
+        const canRef = REF_TYPES.includes(conn.apiType);
+        const person = canRef && s.imgOnPerson !== 'model' && styleHasPerson(s) ? await personRefFor(set.owner) : '';
+        const itemRefs = [];
+        if (canRef) {
+            for (const it of its.filter(x => x.img).slice(0, person ? 4 : 5)) {
+                try { itemRefs.push(await toJpeg(await urlToDataUrl(it.img), 512, 0.85)); } catch { /* без этой картинки */ }
             }
         }
-        const out = await generateImage(conn, setPrompt(set, its, s, refs.length > 0), refs);
+        const refs = [person, ...itemRefs].filter(Boolean);
+        const out = await generateImage(conn, setPrompt(set, its, s, { itemRefs: itemRefs.length > 0, personRef: !!person }), refs, { aspect: styleHasPerson(s) ? '4:3' : '1:1' });
         set.img = await uploadImage(await toJpeg(await urlToDataUrl(out), 1024));
         saveSettings();
     } finally {
@@ -599,9 +652,10 @@ function renderPeople(names) {
 function entryRow(e, list) {
     const sl = slotOf(e.slot);
     const meta = [sl.t, e.state ? `<b class="wd-state">${esc(e.state)}</b>` : ''].filter(Boolean).join(' · ');
+    const look = isLook(sl.k);
     const action = list === 'worn'
-        ? `<button class="wd-mini" data-act="takeoff" data-uid="${esc(e.uid)}" title="Снять"><i class="fa-solid fa-arrow-down"></i><span>снять</span></button>`
-        : `<button class="wd-mini" data-act="puton" data-uid="${esc(e.uid)}" title="Надеть"><i class="fa-solid fa-arrow-up"></i><span>надеть</span></button>`;
+        ? `<button class="wd-mini" data-act="takeoff" data-uid="${esc(e.uid)}" title="Снять"><i class="fa-solid fa-arrow-down"></i><span>${look ? (sl.k === 'makeup' ? 'смыть' : 'убрать') : 'снять'}</span></button>`
+        : `<button class="wd-mini" data-act="puton" data-uid="${esc(e.uid)}" title="Надеть"><i class="fa-solid fa-arrow-up"></i><span>${look ? 'вернуть' : 'надеть'}</span></button>`;
     return `<div class="wd-row ${list === 'off' ? 'is-off' : ''}">
         ${thumb(e)}
         <div class="wd-row-main" data-act="entry-menu" data-uid="${esc(e.uid)}">
@@ -770,15 +824,18 @@ function imgSettings(s) {
     const conn = imgConnection();
     const own = src === 'own' ? `
         <div class="wd-grid2">
-            <div class="wd-field"><label>Провайдер</label><select data-set="imgProvider">${[['openrouter', 'OpenRouter'], ['gemini', 'Gemini (Google)'], ['xai', 'xAI (Grok)'], ['openai', 'OpenAI']].map(([v, t]) => `<option value="${v}" ${v === s.imgProvider ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
-            <div class="wd-field"><label>Модель</label><input type="text" data-set="imgModel" value="${esc(s.imgModel)}" placeholder="${esc(DEFAULT_MODELS[s.imgProvider] || '')}"></div>
+            <div class="wd-field"><label>Провайдер</label><select data-set="imgProvider">${[['naistera', 'Naistera (токен из бота)'], ['openrouter', 'OpenRouter'], ['gemini', 'Gemini (Google)'], ['xai', 'xAI (Grok)'], ['openai', 'OpenAI']].map(([v, t]) => `<option value="${v}" ${v === s.imgProvider ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+            ${s.imgProvider === 'naistera' ? '<div></div>' : `<div class="wd-field"><label>Модель</label><input type="text" data-set="imgModel" value="${esc(s.imgModel)}" placeholder="${esc(DEFAULT_MODELS[s.imgProvider] || '')}"></div>`}
         </div>
-        <div class="wd-field"><label>API-ключ</label><input type="password" data-set="imgKey" value="${esc(s.imgKey)}" autocomplete="off"></div>` : '';
+        <div class="wd-field"><label>${s.imgProvider === 'naistera' ? 'Токен Naistera' : 'API-ключ'}</label><input type="password" data-set="imgKey" value="${esc(s.imgKey)}" autocomplete="off"></div>` : '';
     return `<div class="wd-sec">🎨 Картинки вещей</div>
         <div class="wd-field"><label>Чем рисовать</label><select data-set="imgSource">${opts.map(([v, t]) => `<option value="${esc(v)}" ${v === src ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
         ${own}
         ${conn.apiType === 'naistera' ? `<div class="wd-field"><label>Модель Naistera для вещей</label><select data-set="imgNaisteraModel"><option value="">как в профиле (NovelAI → Nano Banana)</option>${NAISTERA_MODELS.map(m => `<option value="${m}" ${m === s.imgNaisteraModel ? 'selected' : ''}>${m}</option>`).join('')}</select></div>` : ''}
         <div class="wd-field"><label>Стиль</label><select data-set="imgStyle">${Object.entries(STYLES).map(([k, v]) => `<option value="${k}" ${k === s.imgStyle ? 'selected' : ''}>${esc(v.t)}</option>`).join('')}<option value="custom" ${s.imgStyle === 'custom' ? 'selected' : ''}>Свой промпт стиля</option></select></div>
+        <div class="wd-field"><label>На ком рисовать <small>(лукбук, причёски, макияж)</small></label><select data-set="imgOnPerson">
+            <option value="owner" ${s.imgOnPerson !== 'model' ? 'selected' : ''}>на владельце вещи — его лицо из рефов sillyimages/SLAY или аватарки</option>
+            <option value="model" ${s.imgOnPerson === 'model' ? 'selected' : ''}>на нейтральной модели</option></select></div>
         ${s.imgStyle === 'custom' ? `<div class="wd-field"><label>Промпт стиля (по-английски лучше)</label><textarea rows="3" data-set="imgStyleCustom">${esc(s.imgStyleCustom)}</textarea></div>` : ''}
         <label class="wd-switch"><input type="checkbox" data-set="autoDraw" ${s.autoDraw ? 'checked' : ''}><span></span>Сразу рисовать новые вещи</label>
         <div class="wd-hint-soft">${conn.error ? `⚠️ ${esc(conn.error)}` : `Рисую через ${esc(conn.apiType)} · ${esc(conn.model)}`}</div>
@@ -1168,7 +1225,7 @@ async function onClick(ev) {
             if (el.dataset.wear && who) {
                 const st = charState(who);
                 // новый образ: то, что надето в тех же «ячейках» (верх, низ, обувь…), снимаем, потом надеваем всё новое
-                const slots = new Set(created.map(it => it.slot).filter(k => !['acc', 'other', 'hair'].includes(k)));
+                const slots = new Set(created.map(it => it.slot).filter(k => !['acc', 'other'].includes(k)));
                 for (const e of [...st.worn]) {
                     if (slots.has(normSlot(e.slot))) { st.worn.splice(st.worn.indexOf(e), 1); st.off.push(e); }
                 }
