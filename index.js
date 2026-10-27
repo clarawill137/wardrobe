@@ -9,11 +9,11 @@ import {
     CLOTHES_RE, entryFromItem, newEntry, sortBySlot, buildInjection,
     WATCHER_SYSTEM, buildWatcherInput, applyChanges, ANALYZE_SYSTEM, parseAnalyzed, parseAliases,
 } from './core.js';
-import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, resolveConnection, generateImage, itemPrompt, setPrompt, styleHasPerson } from './draw.js';
+import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, ATLAS_EDIT, resolveConnection, generateImage, itemPrompt, setPrompt, styleHasPerson } from './draw.js';
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.3.3';
+const VERSION = '1.4.0';
 
 const DEFAULTS = {
     enabled: true,
@@ -34,6 +34,7 @@ const DEFAULTS = {
     imgKey: '',
     imgModel: '',
     imgNaisteraModel: '',
+    imgAtlasModel: '',
     imgStyle: 'clover',
     imgOnPerson: 'owner',
     faces: {},
@@ -391,7 +392,26 @@ let drawStop = false;
 
 async function urlToDataUrl(u) {
     if (String(u).startsWith('data:')) return u;
-    const r = await fetch(u);
+    let r;
+    try {
+        r = await fetch(u);
+    } catch (e) {
+        // CDN без CORS: пробуем через <img crossOrigin>
+        return await new Promise((res, rej) => {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => {
+                try {
+                    const cv = document.createElement('canvas');
+                    cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+                    cv.getContext('2d').drawImage(img, 0, 0);
+                    res(cv.toDataURL('image/jpeg', 0.92));
+                } catch (err) { rej(new Error('картинку не дали скачать (CORS)')); }
+            };
+            img.onerror = () => rej(new Error('картинка не скачалась'));
+            img.src = u;
+        });
+    }
     if (!r.ok) throw new Error(`картинка не скачалась (${r.status})`);
     const blob = await r.blob();
     return await new Promise((res, rej) => {
@@ -511,7 +531,7 @@ function noteFace(name, ref) {
     window.toastr?.info(`Не нашла лицо для «${esc(name)}» — нарисовала на модели. Загрузи: «На них» → ${esc(shortName(name))} → ⋮ → Лицо для картинок.`, '👗 Гардероб', { timeOut: 9000 });
 }
 
-const REF_TYPES = ['openrouter', 'gemini', 'naistera'];
+const REF_TYPES = ['openrouter', 'gemini', 'naistera', 'atlas'];
 
 function waitToast(sec, status) {
     window.toastr?.info(status === 429 ? `Сервис просит не так часто — жду ${sec} с и пробую снова` : `Сервис картинок сбоит — повтор через ${sec} с`, '👗 Гардероб', { timeOut: Math.min(sec, 8) * 1000 });
@@ -539,7 +559,7 @@ async function drawItem(id, { ref = '' } = {}) {
         try {
             out = await generateImage(conn, prompt, refs, { aspect: styleHasPerson(s, it.slot) ? '4:3' : '1:1', onWait: waitToast });
         } catch (e) {
-            if (person && e?.status !== 429 && (e?.status >= 500 || /moderat|safety|celebr|policy|blocked/i.test(String(e?.message)))) {
+            if (person && e?.status !== 429 && (e?.status >= 500 || e?.status === 451 || /moderat|safety|celebr|policy|blocked/i.test(String(e?.message)))) {
                 e.message += `\n\nПохоже, сервис отказался рисовать по лицу «${who}» (${face?.from}). Grok и Nano Banana часто блокируют лица реальных актёров. Варианты: загрузи для ${shortName(who)} арт-лицо (рисованное, не фото актёра) через ⋮ → «Лицо для картинок», или смени «Модель Naistera для вещей» в ⚙.`;
             }
             throw e;
@@ -587,7 +607,7 @@ async function drawSet(id) {
         try {
             out = await generateImage(conn, setPrompt(set, its, s, { itemRefs: itemRefs.length > 0, personRef: !!person }), refs, { aspect: styleHasPerson(s) ? '4:3' : '1:1', onWait: waitToast });
         } catch (e) {
-            if (person && e?.status !== 429 && (e?.status >= 500 || /moderat|safety|celebr|policy|blocked/i.test(String(e?.message)))) {
+            if (person && e?.status !== 429 && (e?.status >= 500 || e?.status === 451 || /moderat|safety|celebr|policy|blocked/i.test(String(e?.message)))) {
                 e.message += `\n\nПохоже, сервис отказался рисовать по лицу «${who}» (${face?.from}). Grok и Nano Banana часто блокируют лица реальных актёров — загрузи арт-лицо через ⋮ → «Лицо для картинок» или смени модель в ⚙.`;
             }
             throw e;
@@ -891,7 +911,7 @@ function imgSettings(s) {
     const silly = ctx().extensionSettings?.inline_image_gen;
     const slay = ctx().extensionSettings?.slay_image_gen;
     const opts = [['auto', 'авто (SLAY, если он настроен)']];
-    if (slay?.apiKey) opts.push(['slay', `SLAY Images (${slay.apiType || '—'}${slay.apiType === 'naistera' ? `: ${slay.naisteraModel || 'grok'}` : slay.model ? `: ${slay.model}` : ''})`]);
+    if (slay?.apiKey) opts.push(['slay', `SLAY Images (${slay.apiType || '—'}${slay.apiType === 'naistera' ? `: ${slay.naisteraModel || 'grok'}` : slay.apiType === 'atlas' ? `: ${slay.atlasModel || 'kontext'}` : slay.model ? `: ${slay.model}` : ''})`]);
     if (silly) {
         opts.push(['silly', `sillyimages (${silly.apiType || '—'}${silly.model ? `: ${silly.model}` : ''})`]);
         for (const p of silly.connectionProfiles || []) opts.push([p.id, `sillyimages — ${p.name} (${p.apiType})`]);
@@ -902,13 +922,14 @@ function imgSettings(s) {
     const conn = imgConnection();
     const own = src === 'own' ? `
         <div class="wd-grid2">
-            <div class="wd-field"><label>Провайдер</label><select data-set="imgProvider">${[['naistera', 'Naistera (токен из бота)'], ['openrouter', 'OpenRouter'], ['gemini', 'Gemini (Google)'], ['xai', 'xAI (Grok)'], ['openai', 'OpenAI']].map(([v, t]) => `<option value="${v}" ${v === s.imgProvider ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
-            ${s.imgProvider === 'naistera' ? '<div></div>' : `<div class="wd-field"><label>Модель</label><input type="text" data-set="imgModel" value="${esc(s.imgModel)}" placeholder="${esc(DEFAULT_MODELS[s.imgProvider] || '')}"></div>`}
+            <div class="wd-field"><label>Провайдер</label><select data-set="imgProvider">${[['atlas', 'Atlas Cloud'], ['naistera', 'Naistera (токен из бота)'], ['openrouter', 'OpenRouter'], ['gemini', 'Gemini (Google)'], ['xai', 'xAI (Grok)'], ['openai', 'OpenAI']].map(([v, t]) => `<option value="${v}" ${v === s.imgProvider ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+            ${['naistera', 'atlas'].includes(s.imgProvider) ? '<div></div>' : `<div class="wd-field"><label>Модель</label><input type="text" data-set="imgModel" value="${esc(s.imgModel)}" placeholder="${esc(DEFAULT_MODELS[s.imgProvider] || '')}"></div>`}
         </div>
         <div class="wd-field"><label>${s.imgProvider === 'naistera' ? 'Токен Naistera' : 'API-ключ'}</label><input type="password" data-set="imgKey" value="${esc(s.imgKey)}" autocomplete="off"></div>` : '';
     return `<div class="wd-sec">🎨 Картинки вещей</div>
         <div class="wd-field"><label>Чем рисовать</label><select data-set="imgSource">${opts.map(([v, t]) => `<option value="${esc(v)}" ${v === src ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
         ${own}
+        ${conn.apiType === 'atlas' ? `<div class="wd-field"><label>Модель Atlas для вещей <small>(нужна edit-модель: она держит лицо по рефу)</small></label><select data-set="imgAtlasModel"><option value="">${esc(slay?.apiType === 'atlas' && ATLAS_EDIT[slay.atlasModel] ? `как в SLAY (${ATLAS_EDIT[slay.atlasModel].t})` : `по умолчанию (${ATLAS_EDIT[DEFAULT_MODELS.atlas].t})`)}</option>${Object.entries(ATLAS_EDIT).map(([m, v]) => `<option value="${esc(m)}" ${m === s.imgAtlasModel ? 'selected' : ''}>${esc(v.t)}</option>`).join('')}</select></div>` : ''}
         ${conn.apiType === 'naistera' ? `<div class="wd-field"><label>Модель Naistera для вещей</label><select data-set="imgNaisteraModel"><option value="">как в профиле (NovelAI → Nano Banana)</option>${NAISTERA_MODELS.map(m => `<option value="${m}" ${m === s.imgNaisteraModel ? 'selected' : ''}>${m}</option>`).join('')}</select></div>` : ''}
         <div class="wd-field"><label>Стиль</label><select data-set="imgStyle">${Object.entries(STYLES).map(([k, v]) => `<option value="${k}" ${k === s.imgStyle ? 'selected' : ''}>${esc(v.t)}</option>`).join('')}<option value="custom" ${s.imgStyle === 'custom' ? 'selected' : ''}>Свой промпт стиля</option></select></div>
         <div class="wd-field"><label>На ком рисовать <small>(лукбук, причёски, макияж)</small></label><select data-set="imgOnPerson">
@@ -1418,7 +1439,7 @@ async function onInput(ev) {
         s[k] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Math.max(0, parseInt(el.value) || 0) : el.value;
         saveSettings();
         if (k === 'showFab') syncFab();
-        if (['enabled', 'detail', 'depth', 'imgSource', 'imgStyle', 'imgProvider', 'imgNaisteraModel'].includes(k) && ev.type === 'change') render();
+        if (['enabled', 'detail', 'depth', 'imgSource', 'imgStyle', 'imgProvider', 'imgNaisteraModel', 'imgAtlasModel'].includes(k) && ev.type === 'change') render();
         else updateInjection();
         return;
     }

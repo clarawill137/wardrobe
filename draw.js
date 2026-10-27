@@ -1,6 +1,6 @@
 // 👗 Гардероб — картинки вещей и комплектов.
 // Рисует через провайдеров картинок напрямую из браузера (как sillyimages):
-// OpenRouter (Nano Banana и др.), Gemini, xAI (Grok), OpenAI-совместимые.
+// Atlas Cloud (наш патч SLAY), Naistera, OpenRouter (Nano Banana и др.), Gemini, xAI (Grok), OpenAI-совместимые.
 // Подключение берётся из профилей sillyimages или из своих полей в настройках гардероба.
 
 export const STYLES = {
@@ -55,6 +55,16 @@ export const DEFAULT_MODELS = {
     xai: 'grok-imagine-image-2.0',
     openai: 'gpt-image-1',
     naistera: 'nano banana',
+    atlas: 'google/nano-banana-pro/edit-developer',
+};
+
+/** Atlas Cloud: модели, которые умеют рефы (лицо + фото вещи). Без рефов edit-модель сама переходит на свою t2i-версию. */
+export const ATLAS_EDIT = {
+    'google/nano-banana-pro/edit-developer': { field: 'images', t2i: 'google/nano-banana-pro/text-to-image', kind: 'banana', max: 5, t: 'Nano Banana Pro Edit dev (дешевле)' },
+    'google/nano-banana-pro/edit': { field: 'images', t2i: 'google/nano-banana-pro/text-to-image', kind: 'banana', max: 5, t: 'Nano Banana Pro Edit' },
+    'xai/grok-imagine-image-quality/edit': { field: 'image_urls', t2i: 'xai/grok-imagine-image-quality/text-to-image', kind: 'grok', max: 5, t: 'Grok Image Edit' },
+    'openai/gpt-image-2/edit': { field: 'images', t2i: 'openai/gpt-image-2/text-to-image', kind: 'gpt', max: 5, t: 'GPT Image 2 Edit' },
+    'black-forest-labs/flux-kontext-dev': { field: 'image', t2i: 'black-forest-labs/flux-dev', kind: 'kontext', max: 1, t: 'Flux Kontext Dev (1 реф)' },
 };
 
 export const NAISTERA_MODELS = ['nano banana', 'grok', 'grok-pro', 'novelai'];
@@ -72,6 +82,7 @@ const DEFAULT_ENDPOINTS = {
     xai: 'https://api.x.ai',
     openai: 'https://api.openai.com',
     naistera: 'https://naistera.org',
+    atlas: 'https://api.atlascloud.ai',
 };
 
 export const SUPPORTED = Object.keys(DEFAULT_ENDPOINTS);
@@ -140,12 +151,15 @@ export function resolveConnection(s, ext) {
         const sl = ext?.slay_image_gen || {};
         const base = String(sl.endpoint || '').trim().replace(/\/+$/, '').replace(/\/v1(beta)?$/i, '');
         const slKey = sl.apiKey || sl.naisteraApiKey || sl.naisteraKey || sl.apiKeys?.[sl.apiType] || '';
-        if (sl.apiType === 'naistera') c = { apiType: 'naistera', endpoint: base, apiKey: slKey, model: normalizeNaistera(sl.naisteraModel) || 'grok' };
+        if (sl.apiType === 'atlas') {
+            // наш патч SLAY: эндпоинт как есть (может быть свой прокси), модель — edit-версия, чтобы держать лицо
+            c = { apiType: 'atlas', endpoint: String(sl.endpoint || '').trim().replace(/\/+$/, ''), apiKey: slKey, model: ATLAS_EDIT[sl.atlasModel] ? sl.atlasModel : '' };
+        } else if (sl.apiType === 'naistera') c = { apiType: 'naistera', endpoint: base, apiKey: slKey, model: normalizeNaistera(sl.naisteraModel) || 'grok' };
         else if (sl.apiType === 'gemini') c = { apiType: 'gemini', endpoint: base, apiKey: sl.apiKey, model: sl.model };
         else if (sl.apiType === 'openai' || sl.apiType === 'custom') c = { apiType: 'openrouter', endpoint: base ? `${base}/v1` : '', apiKey: slKey, model: sl.model };
-        else return { error: `Профиль SLAY (${sl.apiType || '—'}) гардероб рисовать не умеет. Нужен Naistera, OpenAI (OpenRouter) или Gemini.` };
+        else return { error: `Профиль SLAY (${sl.apiType || '—'}) гардероб рисовать не умеет. Нужен Atlas, Naistera, OpenAI (OpenRouter) или Gemini.` };
     } else if (s.imgSource === 'own') {
-        c = { apiType: s.imgProvider, endpoint: '', apiKey: s.imgKey, model: s.imgProvider === 'naistera' ? (s.imgNaisteraModel || 'nano banana') : s.imgModel, rawEndpoint: false };
+        c = { apiType: s.imgProvider, endpoint: '', apiKey: s.imgKey, model: s.imgProvider === 'naistera' ? (s.imgNaisteraModel || 'nano banana') : s.imgProvider === 'atlas' ? '' : s.imgModel, rawEndpoint: false };
     } else if (s.imgSource && s.imgSource !== 'silly' && silly?.connectionProfiles) {
         c = silly.connectionProfiles.find(p => p.id === s.imgSource) || null;
     }
@@ -154,7 +168,7 @@ export function resolveConnection(s, ext) {
     if (!c) return { error: 'Нет подключения для картинок: выбери в ⚙ профиль sillyimages или впиши свой ключ.' };
     const apiType = String(c.apiType || '');
     if (!SUPPORTED.includes(apiType)) {
-        return { error: `Этот профиль картинок (${apiType || '—'}) гардероб рисовать не умеет. Нужен Naistera, OpenRouter, Gemini, xAI или OpenAI.` };
+        return { error: `Этот профиль картинок (${apiType || '—'}) гардероб рисовать не умеет. Нужен Atlas, Naistera, OpenRouter, Gemini, xAI или OpenAI.` };
     }
     if (!cleanKey(c.apiKey)) return { error: 'В выбранном подключении картинок нет API-ключа.' };
     let model = String(c.model || '').trim() || DEFAULT_MODELS[apiType];
@@ -163,6 +177,7 @@ export function resolveConnection(s, ext) {
         model = normalizeNaistera(s.imgNaisteraModel) || normalizeNaistera(model) || 'grok';
         if (model === 'novelai' && !s.imgNaisteraModel) model = 'nano banana';
     }
+    if (apiType === 'atlas') model = ATLAS_EDIT[s.imgAtlasModel] ? s.imgAtlasModel : (ATLAS_EDIT[c.model] ? c.model : DEFAULT_MODELS.atlas);
     return {
         apiType,
         apiKey: cleanKey(c.apiKey),
@@ -200,6 +215,38 @@ function withTimeout(ms) {
 }
 
 /** refs — data:URL картинок-образцов (только OpenRouter/Gemini). Возвращает data:URL или http-ссылку. */
+function atlasImage(obj) {
+    const d = obj?.data ? obj.data : (obj || {});
+    const pick = (x) => (typeof x === 'string' ? x : (x?.image_url || x?.url || x?.image || null));
+    if (Array.isArray(d.outputs) && d.outputs.length) return pick(d.outputs[0]);
+    if (d.output) return Array.isArray(d.output) ? pick(d.output[0]) : pick(d.output);
+    if (d.image_url) return d.image_url;
+    if (Array.isArray(d.images) && d.images.length) return pick(d.images[0]);
+    return null;
+}
+
+function atlasOut(out) {
+    const s = String(out || '');
+    if (s.startsWith('data:') || /^https?:\/\//i.test(s)) return s;
+    return `data:image/jpeg;base64,${s}`; // enable_base64_output отдаёт голый base64
+}
+
+async function atlasUpload(base, key, dataUrl, signal) {
+    const comma = dataUrl.indexOf(',');
+    const mime = dataUrl.slice(5, comma).split(';')[0] || 'image/jpeg';
+    const bin = atob(dataUrl.slice(comma + 1));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const fd = new FormData();
+    fd.append('file', new Blob([bytes], { type: mime }), mime.includes('png') ? 'ref.png' : 'ref.jpg');
+    const r = await fetch(`${base}/api/v1/model/uploadMedia`, { method: 'POST', headers: { Authorization: `Bearer ${key}` }, body: fd, signal });
+    if (!r.ok) await fail(r, 'Atlas (загрузка рефа)');
+    const j = await r.json();
+    const u = j?.data?.download_url || j?.download_url || j?.data?.url || j?.url;
+    if (!u) throw new Error('Atlas: реф не загрузился');
+    return u;
+}
+
 /** Повтор при перегрузке сервиса (429/5xx): ещё 2 попытки с паузой. */
 export async function generateImage(conn, prompt, refs = [], opts = {}) {
     let last;
@@ -277,6 +324,70 @@ async function generateImageOnce(conn, prompt, refs = [], { aspect = '1:1', time
                 if (p.inline_data) return `data:${p.inline_data.mime_type};base64,${p.inline_data.data}`;
             }
             throw new Error(`Gemini не вернул картинку (${j?.candidates?.[0]?.finishReason || j?.promptFeedback?.blockReason || 'без причины'})`);
+        }
+
+        if (conn.apiType === 'atlas') {
+            const base = conn.endpoint;
+            const info = ATLAS_EDIT[conn.model] || ATLAS_EDIT[DEFAULT_MODELS.atlas];
+            const useRefs = refs.slice(0, info.max);
+            const model = useRefs.length ? conn.model : info.t2i;
+            const auth = { Authorization: `Bearer ${conn.apiKey}` };
+            let body;
+            if (info.kind === 'kontext') {
+                body = useRefs.length
+                    ? { model, prompt, num_images: 1, enable_base64_output: true, seed: -1, guidance_scale: 2.5, num_inference_steps: 28, image: useRefs[0] }
+                    : { model, prompt, num_images: 1, enable_base64_output: true, seed: -1, size: '1024*1024', guidance_scale: 3.5 };
+            } else {
+                body = { model, prompt, enable_base64_output: true };
+                if (info.kind === 'gpt') {
+                    const [w, h] = aspect.split(':').map(Number);
+                    body.size = w > h ? '1536x1024' : w < h ? '1024x1536' : '1024x1024';
+                    body.quality = 'high';
+                } else {
+                    body.aspect_ratio = aspect;
+                    if (info.kind === 'grok') body.resolution = '1k';
+                }
+                if (useRefs.length) body[info.field] = useRefs;
+            }
+            const submit = () => fetch(`${base}/api/v1/model/generateImage`, {
+                method: 'POST',
+                headers: { ...auth, 'Content-Type': 'application/json' },
+                signal: to.signal,
+                body: JSON.stringify(body),
+            });
+            let r = await submit();
+            if (!r.ok && useRefs.length && info.kind !== 'kontext' && r.status >= 400 && r.status < 500 && ![401, 402, 429].includes(r.status)) {
+                // некоторые модели хотят ссылки, а не data:URI — заливаем рефы на Atlas и пробуем ещё раз
+                body[info.field] = [];
+                for (const u of useRefs) body[info.field].push(await atlasUpload(base, conn.apiKey, u, to.signal));
+                r = await submit();
+            }
+            if (!r.ok) await fail(r, 'Atlas');
+            const j = await r.json();
+            const now = atlasImage(j);
+            if (now) return atlasOut(now);
+            const id = j?.data?.id || j?.id || j?.request_id || j?.data?.request_id;
+            if (!id) throw new Error(`Atlas не вернул id задачи: ${JSON.stringify(j).slice(0, 200)}`);
+            const started = Date.now();
+            while (Date.now() - started < timeoutMs) {
+                await new Promise(res => setTimeout(res, 2000));
+                const pr = await fetch(`${base}/api/v1/model/prediction/${encodeURIComponent(id)}`, { headers: auth, signal: to.signal });
+                if (!pr.ok) await fail(pr, 'Atlas');
+                const pj = await pr.json();
+                const st = String(pj?.data?.status || pj?.status || '').toLowerCase();
+                if (['completed', 'succeeded', 'success'].includes(st)) {
+                    const u = atlasImage(pj);
+                    if (!u) throw new Error('Atlas: готово, но без картинки');
+                    return atlasOut(u);
+                }
+                if (['failed', 'error', 'canceled', 'cancelled'].includes(st)) {
+                    const why = JSON.stringify(pj?.data?.error || pj?.error || pj).slice(0, 300);
+                    const e = new Error(`Atlas не нарисовал: ${why}`);
+                    e.status = /moderat|safety|nsfw|celebr|policy|sensitive/i.test(why) ? 451 : 0;
+                    throw e;
+                }
+            }
+            throw new Error('Atlas: картинка рисовалась слишком долго (таймаут)');
         }
 
         if (conn.apiType === 'naistera') {
