@@ -13,7 +13,7 @@ import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, resolveConnection, generateIma
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.2.0';
+const VERSION = '1.2.1';
 
 const DEFAULTS = {
     enabled: true,
@@ -29,7 +29,7 @@ const DEFAULTS = {
     fabPos: null,
     watcherTokens: 1500,
     timeoutSec: 60,
-    imgSource: 'silly',
+    imgSource: 'auto',
     imgProvider: 'openrouter',
     imgKey: '',
     imgModel: '',
@@ -53,6 +53,7 @@ function settings() {
     if (!Array.isArray(s.items)) s.items = [];
     if (!Array.isArray(s.sets)) s.sets = [];
     if (!s.migr120) { if (s.imgStyle === 'sketch') s.imgStyle = 'clover'; s.migr120 = true; }
+    if (!s.migr121) { if (!s.imgSource || s.imgSource === 'silly') s.imgSource = 'auto'; s.migr121 = true; }
     return s;
 }
 const saveSettings = () => ctx().saveSettingsDebounced();
@@ -812,13 +813,13 @@ function renderCfg() {
 function imgSettings(s) {
     const silly = ctx().extensionSettings?.inline_image_gen;
     const slay = ctx().extensionSettings?.slay_image_gen;
-    const opts = [];
+    const opts = [['auto', 'авто (SLAY, если он настроен)']];
+    if (slay?.apiKey) opts.push(['slay', `SLAY Images (${slay.apiType || '—'}${slay.apiType === 'naistera' ? `: ${slay.naisteraModel || 'grok'}` : slay.model ? `: ${slay.model}` : ''})`]);
     if (silly) {
-        opts.push(['silly', `sillyimages — текущее (${silly.apiType || '—'}${silly.model ? `: ${silly.model}` : ''})`]);
+        opts.push(['silly', `sillyimages (${silly.apiType || '—'}${silly.model ? `: ${silly.model}` : ''})`]);
         for (const p of silly.connectionProfiles || []) opts.push([p.id, `sillyimages — ${p.name} (${p.apiType})`]);
     }
-    if (slay?.apiKey) opts.push(['slay', `SLAY Images — текущее (${slay.apiType || '—'}${slay.model ? `: ${slay.model}` : ''})`]);
-    opts.push(['own', 'свой ключ']);
+    opts.push(['own', 'свой ключ / токен']);
     const src = opts.some(o => o[0] === s.imgSource) ? s.imgSource : opts[0][0];
     if (src !== s.imgSource) { s.imgSource = src; saveSettings(); }
     const conn = imgConnection();

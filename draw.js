@@ -116,8 +116,11 @@ export function resolveConnection(s, ext) {
     const silly = ext?.inline_image_gen;
     let c = null;
     // по умолчанию «sillyimages»; если его нет, а SLAY настроен — берём SLAY
-    let src = s.imgSource || 'silly';
-    if (src === 'silly' && !silly && ext?.slay_image_gen?.apiKey) src = 'slay';
+    // «авто»: сначала SLAY (он у тебя рабочий), потом sillyimages.
+    // В settings.json могут лежать СТАРЫЕ настройки sillyimages (их когда-то импортировал SLAY) —
+    // со старым токеном и моделью, поэтому сами по себе они не выбираются.
+    let src = s.imgSource || 'auto';
+    if (src === 'auto') src = ext?.slay_image_gen?.apiKey ? 'slay' : silly ? 'silly' : 'own';
     s = { ...s, imgSource: src };
     if (s.imgSource === 'slay') {
         // SLAY Images: «openai» там — это chat/completions с картинкой (как у OpenRouter)
