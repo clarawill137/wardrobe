@@ -48,6 +48,25 @@
 @keyframes wd-spin { to { transform: rotate(360deg); } }
 
 /* ───── плашка ───── */
+#wd-dialog {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    overflow: hidden;
+    color: inherit;
+}
+#wd-dialog::backdrop { background: transparent; }
+#wd-dialog:not([open]) { display: none; }
+.wd-ver { font-size: 0.5em; font-weight: 600; opacity: 0.45; margin-left: 2px; align-self: flex-end; padding-bottom: 4px; }
+
 #wd-backdrop {
     position: fixed;
     inset: 0;

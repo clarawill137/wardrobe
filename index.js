@@ -12,7 +12,7 @@ import {
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.0.4';
+const VERSION = '1.0.5';
 
 const DEFAULTS = {
     enabled: true,
@@ -1073,7 +1073,7 @@ function buildPanel() {
     panel.innerHTML = `
         <div class="wd-grab"></div>
         <div class="wd-head">
-            <div class="wd-title"><span class="wd-logo">👗</span>Гардероб</div>
+            <div class="wd-title"><span class="wd-logo">👗</span>Гардероб<small class="wd-ver">${VERSION}</small></div>
             <button class="wd-x" data-act="close" title="Закрыть"><i class="fa-solid fa-xmark"></i></button>
         </div>
         <div class="wd-tabs">
@@ -1084,7 +1084,13 @@ function buildPanel() {
         </div>
         <div class="wd-body"></div>
         <div class="wd-modal-host"></div>`;
-    document.body.append(back, panel);
+    // плашка живёт в <dialog>, открытом через showModal(): это «верхний слой» браузера,
+    // его не может перекрыть ни одна тема или расширение, какой бы z-index у них ни был
+    const dlg = document.createElement('dialog');
+    dlg.id = 'wd-dialog';
+    dlg.append(back, panel);
+    dlg.addEventListener('cancel', (e) => { e.preventDefault(); closePanel('Esc'); });
+    document.body.append(dlg);
     panel.addEventListener('click', onClick);
     panel.addEventListener('input', onInput);
     panel.addEventListener('change', onInput);
@@ -1111,6 +1117,10 @@ function openPanel(tab) {
         if (tab) ui.tab = tab;
         ui.open = true;
         render();
+        const dlg = document.getElementById('wd-dialog');
+        if (dlg && !dlg.open) {
+            if (typeof dlg.showModal === 'function') dlg.showModal(); else dlg.setAttribute('open', '');
+        }
     } catch (e) {
         console.error('[Гардероб] open', e);
         window.toastr?.error(esc(String(e?.message || e)), '👗 Гардероб: ошибка', { timeOut: 15000 });
@@ -1120,7 +1130,7 @@ function openPanel(tab) {
         document.getElementById('wd-backdrop')?.classList.add('on');
         document.getElementById('wd-panel')?.classList.add('on');
     }));
-    if (settings().debug !== false) diagnoseOpen();
+    if (settings().debug === true) diagnoseOpen();
 }
 
 /** Через 1,5 с после открытия: если плашки не видно — сказать почему (для отладки на телефоне). */
@@ -1169,6 +1179,11 @@ function closePanel(reason = 'неизвестно') {
     closeModal();
     document.getElementById('wd-backdrop')?.classList.remove('on');
     document.getElementById('wd-panel')?.classList.remove('on');
+    const t = openedAt;
+    setTimeout(() => {
+        const dlg = document.getElementById('wd-dialog');
+        if (dlg?.open && openedAt === t && !ui.open) dlg.close();
+    }, 380);
 }
 
 function togglePanel() {
