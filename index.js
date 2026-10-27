@@ -13,7 +13,7 @@ import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, resolveConnection, generateIma
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.3.1';
+const VERSION = '1.3.2';
 
 const DEFAULTS = {
     enabled: true,
@@ -531,7 +531,15 @@ async function drawItem(id, { ref = '' } = {}) {
         const person = face?.dataUrl || '';
         const refs = [person, canRef ? ref : ''].filter(Boolean);
         const prompt = itemPrompt(it, s, { personRef: !!person, photoRef: !!(ref && canRef) });
-        const out = await generateImage(conn, prompt, refs, { aspect: styleHasPerson(s, it.slot) ? '4:3' : '1:1' });
+        let out;
+        try {
+            out = await generateImage(conn, prompt, refs, { aspect: styleHasPerson(s, it.slot) ? '4:3' : '1:1' });
+        } catch (e) {
+            if (person && (e?.status >= 500 || /moderat|safety|celebr|policy|blocked/i.test(String(e?.message)))) {
+                e.message += `\n\nПохоже, сервис отказался рисовать по лицу «${who}» (${face?.from}). Grok и Nano Banana часто блокируют лица реальных актёров. Варианты: загрузи для ${shortName(who)} арт-лицо (рисованное, не фото актёра) через ⋮ → «Лицо для картинок», или смени «Модель Naistera для вещей» в ⚙.`;
+            }
+            throw e;
+        }
         const path = await uploadImage(await toJpeg(await urlToDataUrl(out)));
         it.img = path;
         it.drawn = true;
@@ -571,7 +579,15 @@ async function drawSet(id) {
             }
         }
         const refs = [person, ...itemRefs].filter(Boolean);
-        const out = await generateImage(conn, setPrompt(set, its, s, { itemRefs: itemRefs.length > 0, personRef: !!person }), refs, { aspect: styleHasPerson(s) ? '4:3' : '1:1' });
+        let out;
+        try {
+            out = await generateImage(conn, setPrompt(set, its, s, { itemRefs: itemRefs.length > 0, personRef: !!person }), refs, { aspect: styleHasPerson(s) ? '4:3' : '1:1' });
+        } catch (e) {
+            if (person && (e?.status >= 500 || /moderat|safety|celebr|policy|blocked/i.test(String(e?.message)))) {
+                e.message += `\n\nПохоже, сервис отказался рисовать по лицу «${who}» (${face?.from}). Grok и Nano Banana часто блокируют лица реальных актёров — загрузи арт-лицо через ⋮ → «Лицо для картинок» или смени модель в ⚙.`;
+            }
+            throw e;
+        }
         set.img = await uploadImage(await toJpeg(await urlToDataUrl(out), 1024));
         saveSettings();
     } finally {
@@ -599,7 +615,7 @@ async function runDrawQueue() {
                 done++;
             } catch (e) {
                 console.warn('[Гардероб] рисование', e);
-                window.toastr?.warning(esc(String(e.message || e)), '👗 Гардероб: картинка не нарисовалась', { timeOut: 8000 });
+                window.toastr?.warning(esc(String(e.message || e)).replace(/\n/g, '<br>'), '👗 Гардероб: картинка не нарисовалась', { timeOut: 0, extendedTimeOut: 0, closeButton: true, escapeHtml: false });
                 drawQ.length = 0;
             }
         }

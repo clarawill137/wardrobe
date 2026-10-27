@@ -183,8 +183,11 @@ async function fail(r, who) {
         const j = JSON.parse(raw);
         msg = typeof j.error === 'string' ? j.error : (j.error?.message || j.message || raw);
     } catch { /* не JSON */ }
-    const hint = r.status === 401 || r.status === 403 ? ' — ключ/токен не принят: проверь его в настройках (или впиши свой в ⚙ гардероба)' : '';
-    throw new Error(`${who} ${r.status}${hint}: ${String(msg).slice(0, 300)}`);
+    const hint = r.status === 401 || r.status === 403 ? ' — ключ/токен не принят: проверь его в настройках (или впиши свой в ⚙ гардероба)'
+        : r.status >= 500 ? ' — сервис картинок не справился' : '';
+    const err = new Error(`${who} ${r.status}${hint}: ${String(msg).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300)}`);
+    err.status = r.status;
+    throw err;
 }
 
 function withTimeout(ms) {
@@ -194,7 +197,22 @@ function withTimeout(ms) {
 }
 
 /** refs — data:URL картинок-образцов (только OpenRouter/Gemini). Возвращает data:URL или http-ссылку. */
-export async function generateImage(conn, prompt, refs = [], { aspect = '1:1', timeoutMs = 180000 } = {}) {
+/** Повтор при перегрузке сервиса (429/5xx): ещё 2 попытки с паузой. */
+export async function generateImage(conn, prompt, refs = [], opts = {}) {
+    let last;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            return await generateImageOnce(conn, prompt, refs, opts);
+        } catch (e) {
+            last = e;
+            if (!(e?.status === 429 || e?.status >= 500)) throw e;
+            await new Promise(r => setTimeout(r, 4000 * (attempt + 1)));
+        }
+    }
+    throw last;
+}
+
+async function generateImageOnce(conn, prompt, refs = [], { aspect = '1:1', timeoutMs = 180000 } = {}) {
     const to = withTimeout(timeoutMs);
     try {
         if (conn.apiType === 'openrouter') {
