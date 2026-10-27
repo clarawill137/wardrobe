@@ -9,11 +9,11 @@ import {
     CLOTHES_RE, entryFromItem, newEntry, sortBySlot, buildInjection,
     WATCHER_SYSTEM, buildWatcherInput, applyChanges, ANALYZE_SYSTEM, parseAnalyzed, parseAliases,
 } from './core.js';
-import { STYLES, DEFAULT_MODELS, resolveConnection, generateImage, itemPrompt, setPrompt } from './draw.js';
+import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, resolveConnection, generateImage, itemPrompt, setPrompt } from './draw.js';
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.1.0';
+const VERSION = '1.1.1';
 
 const DEFAULTS = {
     enabled: true,
@@ -33,6 +33,7 @@ const DEFAULTS = {
     imgProvider: 'openrouter',
     imgKey: '',
     imgModel: '',
+    imgNaisteraModel: '',
     imgStyle: 'sketch',
     imgStyleCustom: '',
     autoDraw: true,
@@ -428,7 +429,7 @@ async function drawItem(id, { ref = '' } = {}) {
     drawing.add(id);
     paintDrawing();
     try {
-        const refs = ref && ['openrouter', 'gemini'].includes(conn.apiType) ? [ref] : [];
+        const refs = ref && ['openrouter', 'gemini', 'naistera'].includes(conn.apiType) ? [ref] : [];
         let prompt = itemPrompt(it, s);
         if (refs.length) prompt += '\nThe attached photo shows the real item (maybe as part of a whole outfit): draw ONLY this item from it, keeping its exact colour, fabric and details.';
         const out = await generateImage(conn, prompt, refs);
@@ -459,7 +460,7 @@ async function drawSet(id) {
     paintDrawing();
     try {
         const refs = [];
-        if (['openrouter', 'gemini'].includes(conn.apiType)) {
+        if (['openrouter', 'gemini', 'naistera'].includes(conn.apiType)) {
             for (const it of its.filter(x => x.img).slice(0, 6)) {
                 try { refs.push(await toJpeg(await urlToDataUrl(it.img), 512, 0.85)); } catch { /* без этой картинки */ }
             }
@@ -776,6 +777,7 @@ function imgSettings(s) {
     return `<div class="wd-sec">🎨 Картинки вещей</div>
         <div class="wd-field"><label>Чем рисовать</label><select data-set="imgSource">${opts.map(([v, t]) => `<option value="${esc(v)}" ${v === src ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
         ${own}
+        ${conn.apiType === 'naistera' ? `<div class="wd-field"><label>Модель Naistera для вещей</label><select data-set="imgNaisteraModel"><option value="">как в профиле (NovelAI → Nano Banana)</option>${NAISTERA_MODELS.map(m => `<option value="${m}" ${m === s.imgNaisteraModel ? 'selected' : ''}>${m}</option>`).join('')}</select></div>` : ''}
         <div class="wd-field"><label>Стиль</label><select data-set="imgStyle">${Object.entries(STYLES).map(([k, v]) => `<option value="${k}" ${k === s.imgStyle ? 'selected' : ''}>${esc(v.t)}</option>`).join('')}<option value="custom" ${s.imgStyle === 'custom' ? 'selected' : ''}>Свой промпт стиля</option></select></div>
         ${s.imgStyle === 'custom' ? `<div class="wd-field"><label>Промпт стиля (по-английски лучше)</label><textarea rows="3" data-set="imgStyleCustom">${esc(s.imgStyleCustom)}</textarea></div>` : ''}
         <label class="wd-switch"><input type="checkbox" data-set="autoDraw" ${s.autoDraw ? 'checked' : ''}><span></span>Сразу рисовать новые вещи</label>
@@ -1258,7 +1260,7 @@ async function onInput(ev) {
         s[k] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Math.max(0, parseInt(el.value) || 0) : el.value;
         saveSettings();
         if (k === 'showFab') syncFab();
-        if (['enabled', 'detail', 'depth', 'imgSource', 'imgStyle', 'imgProvider'].includes(k) && ev.type === 'change') render();
+        if (['enabled', 'detail', 'depth', 'imgSource', 'imgStyle', 'imgProvider', 'imgNaisteraModel'].includes(k) && ev.type === 'change') render();
         else updateInjection();
         return;
     }

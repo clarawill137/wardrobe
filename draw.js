@@ -31,13 +31,24 @@ export const DEFAULT_MODELS = {
     gemini: 'gemini-3.1-flash-image-preview',
     xai: 'grok-imagine-image-2.0',
     openai: 'gpt-image-1',
+    naistera: 'nano banana',
 };
+
+export const NAISTERA_MODELS = ['nano banana', 'grok', 'grok-pro', 'novelai'];
+
+export function normalizeNaistera(m) {
+    const r = String(m || '').trim().toLowerCase();
+    if (!r) return '';
+    if (/banana/.test(r)) return 'nano banana';
+    return NAISTERA_MODELS.includes(r) ? r : 'grok';
+}
 
 const DEFAULT_ENDPOINTS = {
     openrouter: 'https://openrouter.ai/api/v1',
     gemini: 'https://generativelanguage.googleapis.com',
     xai: 'https://api.x.ai',
     openai: 'https://api.openai.com',
+    naistera: 'https://naistera.org',
 };
 
 export const SUPPORTED = Object.keys(DEFAULT_ENDPOINTS);
@@ -62,29 +73,41 @@ export function setPrompt(set, items, s, withRefs = false) {
 export function resolveConnection(s, ext) {
     const silly = ext?.inline_image_gen;
     let c = null;
+    // по умолчанию «sillyimages»; если его нет, а SLAY настроен — берём SLAY
+    let src = s.imgSource || 'silly';
+    if (src === 'silly' && !silly && ext?.slay_image_gen?.apiKey) src = 'slay';
+    s = { ...s, imgSource: src };
     if (s.imgSource === 'slay') {
         // SLAY Images: «openai» там — это chat/completions с картинкой (как у OpenRouter)
         const sl = ext?.slay_image_gen || {};
         const base = String(sl.endpoint || '').trim().replace(/\/+$/, '').replace(/\/v1(beta)?$/i, '');
-        if (sl.apiType === 'gemini') c = { apiType: 'gemini', endpoint: base, apiKey: sl.apiKey, model: sl.model };
+        if (sl.apiType === 'naistera') c = { apiType: 'naistera', endpoint: base, apiKey: sl.apiKey, model: normalizeNaistera(sl.naisteraModel) || 'grok' };
+        else if (sl.apiType === 'gemini') c = { apiType: 'gemini', endpoint: base, apiKey: sl.apiKey, model: sl.model };
         else if (sl.apiType === 'openai' || sl.apiType === 'custom') c = { apiType: 'openrouter', endpoint: base ? `${base}/v1` : '', apiKey: sl.apiKey, model: sl.model };
-        else return { error: `Профиль SLAY (${sl.apiType || '—'}) гардероб рисовать не умеет. Нужен режим OpenAI (OpenRouter) или Gemini.` };
+        else return { error: `Профиль SLAY (${sl.apiType || '—'}) гардероб рисовать не умеет. Нужен Naistera, OpenAI (OpenRouter) или Gemini.` };
     } else if (s.imgSource === 'own') {
         c = { apiType: s.imgProvider, endpoint: '', apiKey: s.imgKey, model: s.imgModel, rawEndpoint: false };
     } else if (s.imgSource && s.imgSource !== 'silly' && silly?.connectionProfiles) {
         c = silly.connectionProfiles.find(p => p.id === s.imgSource) || null;
     }
-    if (!c && silly && s.imgSource !== 'own') c = silly;
+    if (!c && silly && s.imgSource !== 'own' && s.imgSource !== 'slay') c = silly;
+    if (c && c.apiType === 'naistera' && !c.model) c = { ...c, model: normalizeNaistera(c.naisteraModel) || 'grok' };
     if (!c) return { error: 'Нет подключения для картинок: выбери в ⚙ профиль sillyimages или впиши свой ключ.' };
     const apiType = String(c.apiType || '');
     if (!SUPPORTED.includes(apiType)) {
-        return { error: `Этот профиль картинок (${apiType || '—'}) гардероб рисовать не умеет. Нужен OpenRouter, Gemini, xAI или OpenAI.` };
+        return { error: `Этот профиль картинок (${apiType || '—'}) гардероб рисовать не умеет. Нужен Naistera, OpenRouter, Gemini, xAI или OpenAI.` };
     }
     if (!c.apiKey) return { error: 'В выбранном подключении картинок нет API-ключа.' };
+    let model = String(c.model || '').trim() || DEFAULT_MODELS[apiType];
+    if (apiType === 'naistera') {
+        // своя модель для вещей; NovelAI понимает только теги — для вещей берём Nano Banana
+        model = normalizeNaistera(s.imgNaisteraModel) || normalizeNaistera(model) || 'grok';
+        if (model === 'novelai' && !s.imgNaisteraModel) model = 'nano banana';
+    }
     return {
         apiType,
         apiKey: String(c.apiKey).trim(),
-        model: String(c.model || '').trim() || DEFAULT_MODELS[apiType],
+        model,
         endpoint: String(c.endpoint || '').trim().replace(/\/+$/, '') || DEFAULT_ENDPOINTS[apiType],
         rawEndpoint: !!c.rawEndpoint,
     };
@@ -170,6 +193,37 @@ export async function generateImage(conn, prompt, refs = [], { aspect = '1:1', t
                 if (p.inline_data) return `data:${p.inline_data.mime_type};base64,${p.inline_data.data}`;
             }
             throw new Error(`Gemini не вернул картинку (${j?.candidates?.[0]?.finishReason || j?.promptFeedback?.blockReason || 'без причины'})`);
+        }
+
+        if (conn.apiType === 'naistera') {
+            const base = conn.endpoint.replace(/\/api\/generate\/?$/i, '');
+            const body = { prompt, aspect_ratio: aspect, model: conn.model };
+            if (refs.length) body.reference_images = refs.slice(0, 6);
+            const r = await fetch(`${base}/api/generate`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${conn.apiKey}`, 'Content-Type': 'application/json' },
+                signal: to.signal,
+                body: JSON.stringify(body),
+            });
+            if (!r.ok) await fail(r, 'Naistera');
+            let j = await r.json();
+            if (j?.job_id && !j?.data_url) {
+                // очередь Naistera: опрашиваем задачу
+                const started = Date.now();
+                while (Date.now() - started < timeoutMs) {
+                    await new Promise(res => setTimeout(res, 3000));
+                    const pr = await fetch(`${base}/api/generate/jobs/${encodeURIComponent(j.job_id)}`, {
+                        headers: { Authorization: `Bearer ${conn.apiKey}`, Accept: 'application/json' },
+                        signal: to.signal,
+                    });
+                    if (!pr.ok) await fail(pr, 'Naistera');
+                    const pj = await pr.json().catch(() => null);
+                    if (pj?.data_url) { j = pj; break; }
+                    if (/fail|error|cancel/i.test(String(pj?.status || ''))) throw new Error(`Naistera: ${pj?.error || pj?.status}`);
+                }
+            }
+            if (j?.data_url) return j.data_url;
+            throw new Error(`Naistera не вернула картинку${j?.error ? `: ${String(j.error).slice(0, 200)}` : ''}`);
         }
 
         // xAI и OpenAI-совместимые: images/generations
