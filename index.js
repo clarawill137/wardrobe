@@ -12,7 +12,7 @@ import {
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.0.1';
+const VERSION = '1.0.2';
 
 const DEFAULTS = {
     enabled: true,
@@ -1063,7 +1063,11 @@ function buildPanel() {
     if (document.getElementById('wd-panel')) return;
     const back = document.createElement('div');
     back.id = 'wd-backdrop';
-    back.addEventListener('click', closePanel);
+    // закрываем только настоящим тапом по фону: палец должен опуститься именно на фон,
+    // а не «призрачный» клик от тапа по кнопке, которым плашку только что открыли (iOS)
+    let downOnBack = false;
+    back.addEventListener('pointerdown', () => { downOnBack = Date.now() - openedAt > 450; });
+    back.addEventListener('click', () => { if (downOnBack) closePanel(); downOnBack = false; });
     const panel = document.createElement('div');
     panel.id = 'wd-panel';
     panel.innerHTML = `
@@ -1090,7 +1094,7 @@ function buildPanel() {
     const head = panel.querySelector('.wd-grab');
     const headBar = panel.querySelector('.wd-head');
     for (const h of [head, headBar]) {
-        h.addEventListener('touchstart', e => { y0 = e.touches[0].clientY; }, { passive: true });
+        h.addEventListener('touchstart', e => { y0 = Date.now() - openedAt > 450 ? e.touches[0].clientY : null; }, { passive: true });
         h.addEventListener('touchend', e => {
             if (y0 !== null && e.changedTouches[0].clientY - y0 > 70) closePanel();
             y0 = null;
@@ -1098,7 +1102,10 @@ function buildPanel() {
     }
 }
 
+let openedAt = 0;
+
 function openPanel(tab) {
+    openedAt = Date.now();
     try {
         buildPanel();
         if (tab) ui.tab = tab;
@@ -1122,7 +1129,10 @@ function closePanel() {
     document.getElementById('wd-panel')?.classList.remove('on');
 }
 
-function togglePanel() { ui.open ? closePanel() : openPanel(); }
+function togglePanel() {
+    const shown = document.getElementById('wd-panel')?.classList.contains('on');
+    if (shown && Date.now() - openedAt > 450) closePanel(); else if (!shown) openPanel();
+}
 
 function syncFab() {
     const s = settings();
@@ -1171,7 +1181,7 @@ function addWandButton() {
     btn.className = 'list-group-item flex-container flexGap5 interactable';
     btn.tabIndex = 0;
     btn.innerHTML = '<div class="fa-solid fa-shirt extensionsMenuExtensionButton"></div><span>Гардероб</span>';
-    btn.addEventListener('click', () => setTimeout(() => openPanel(), 60));
+    btn.addEventListener('click', () => openPanel());
     menu.append(btn);
     return true;
 }
