@@ -77,6 +77,61 @@ export function entryFromItem(it) {
     return e;
 }
 
+// ───── похожие названия: «черная сумка-тоут Хеди» = «чёрная сумка-тоут» ─────
+
+const STOP = new Set(['с', 'со', 'и', 'на', 'в', 'во', 'из', 'для', 'по', 'под', 'над', 'от', 'до', 'без', 'к', 'у', 'её', 'ее', 'его', 'их', 'свой', 'своя', 'свои', 'the', 'a', 'an', 'with', 'and', 'of', 'in']);
+const ENDINGS = /(ого|его|ому|ему|ыми|ими|ами|ями|ая|яя|ое|ее|ые|ие|ый|ий|ой|ую|юю|ым|им|ых|их|ах|ях|ов|ев|ей|ам|ям|ом|ем|а|я|о|е|ы|и|у|ю|ь)$/;
+
+/** Корни значимых слов названия, без имён персонажей. */
+export function nameKey(name, ownerWords = []) {
+    return norm(name).replace(/[«»"'.,;:!?()\[\]\-–—/+]/g, ' ').split(/\s+/)
+        .filter(w => w.length > 1 && !STOP.has(w) && !ownerWords.includes(w))
+        .map(w => (w.length > 4 ? w.replace(ENDINGS, '') : w).slice(0, 6));
+}
+
+const slotsCompatible = (a, b) => {
+    const x = normSlot(a), y = normSlot(b);
+    return x === y || x === 'other' || y === 'other';
+};
+
+/** 0…1: какая доля слов короткого названия есть в длинном (тот же тип вещи обязателен). */
+export function sameThing(a, b, ownerWords = []) {
+    if (!slotsCompatible(a.slot, b.slot)) return 0;
+    const A = new Set(nameKey(a.name, ownerWords));
+    const B = new Set(nameKey(b.name, ownerWords));
+    if (!A.size || !B.size) return 0;
+    let n = 0;
+    for (const x of A) if (B.has(x)) n++;
+    return n / Math.min(A.size, B.size);
+}
+
+const SAME = 0.75;
+const SINGLE = ['hair', 'makeup']; // причёска и макияж — по одной на персонажа
+
+/** Слова, которые выкидываем при сравнении: имена персонажей и их прозвища. */
+export function ownerWordsOf(names = [], aliases = {}) {
+    const out = new Set();
+    for (const n of names) for (const w of norm(n).split(/\s+/)) if (w.length > 1) out.add(w);
+    for (const [n, list] of Object.entries(aliases || {})) {
+        for (const w of norm(n).split(/\s+/)) if (w.length > 1) out.add(w);
+        for (const a of list) for (const w of norm(a).split(/\s+/)) if (w.length > 1) out.add(w);
+    }
+    return [...out];
+}
+
+/** Найти вещь по id шкафа у любого персонажа и вынуть её оттуда (вещь одна — не копируем). */
+export function detachItem(chars, itemId, exceptWorn = null) {
+    if (!itemId) return null;
+    for (const st of Object.values(chars || {})) {
+        for (const list of ['worn', 'off']) {
+            const arr = st?.[list] || [];
+            const i = arr.findIndex(e => e.itemId === itemId);
+            if (i >= 0 && arr !== exceptWorn) return arr.splice(i, 1)[0];
+        }
+    }
+    return null;
+}
+
 /** Платье конфликтует с верхом и низом: надел платье — снимаются топ и брюки, и наоборот. */
 const CONFLICT = { dress: ['top', 'bottom'], top: ['dress'], bottom: ['dress'] };
 
@@ -170,13 +225,15 @@ export const WATCHER_SYSTEM = `Ты — костюмер ролевой исто
 Правила:
 - Меняй только то, что реально произошло в тексте сейчас: снял(а), надел(а), разделся, переоделся, расстегнул, порвал, промок, накинул чужую вещь. Воспоминания, планы, мысли, желания, сравнения — НЕ изменения.
 - remove — id надетых вещей (из worn), которые сняли. Они не исчезают, а лежат рядом.
-- wear — id вещей, которые снова надели: из off этого персонажа или из шкафа (closet).
-- add — новые вещи, которых нет ни в worn, ни в off, ни в шкафу: {"name": "короткое название по-русски: цвет, материал, фасон", "slot": одно из [outer, dress, top, bottom, under, legwear, shoes, head, acc, hair, makeup, other]}. Чужая вещь — добавь владельца в название: «худи Баки».
+- wear — id вещей, которые надели: из off этого персонажа, из worn/off ДРУГОГО персонажа (передал, отдал, взял, накинул чужое — вещь перейдёт к нему) или из шкафа (closet).
+- add — ТОЛЬКО совсем новые вещи, которых нет нигде: ни у кого в worn/off и ни в шкафу. {"name": "короткое название по-русски: цвет, материал, фасон", "slot": одно из [outer, dress, top, bottom, under, legwear, shoes, head, acc, hair, makeup, other]}.
+- Текст часто описывает уже известную вещь другими словами («тоут», «её сумка», «помада цвета шоколада» при уже записанном макияже) — это та же вещь: используй её id или ничего не делай. Не добавляй её ещё раз через add и не добавляй имя владельца в название.
 - Причёска (slot hair) и макияж (slot makeup) — тоже «вещи»: распустила хвост, заплела косу → remove старую причёску + add новую; смыла макияж → remove; размазалась тушь, растрепались волосы → state.
 - state — пометка на надетой вещи: {"id": "...", "state": "расстёгнута"}; пустая строка снимает пометку.
 - discard — id вещей, которые испорчены, выброшены или остались где-то насовсем.
 - «Разделся догола» = remove всех его worn, КРОМЕ закреплённых (pinned), причёски (hair) и макияжа (makeup).
-- pinned: true — постоянные вещи (обручальное кольцо, пирсинг, жетоны): снимай их, только если в тексте прямо сказано, что сняли именно эту вещь. Переоделся в другое = remove старого + add/wear нового.
+- pinned: true — постоянные вещи (обручальное кольцо, пирсинг, жетоны): снимай их, только если в тексте прямо сказано, что сняли именно эту вещь.
+- Переоделся в другое = remove старого + wear/add нового. Причёска и макияж — по одной на персонажа: новая причёска или новый макияж = remove старого + add нового.
 - who — имя персонажа как в гардеробе. Если вещь надел персонаж, которого нет в гардеробе, всё равно укажи его имя.
 - note — 2–6 слов, что случилось («Баки снял куртку»).
 - Нет изменений — {"changes": []}.
@@ -237,6 +294,7 @@ const asArr = (v) => (Array.isArray(v) ? v : v ? [v] : []);
  */
 export function applyChanges(chars, changes, map, closet, cast = [], aliases = {}) {
     const notes = [];
+    const ownerWords = ownerWordsOf([...cast, ...Object.keys(chars || {})], aliases);
     const byId = (id) => map[String(id || '').trim()];
     for (const ch of asArr(changes)) {
         if (!ch || typeof ch !== 'object') continue;
@@ -275,9 +333,7 @@ export function applyChanges(chars, changes, map, closet, cast = [], aliases = {
             if (ref?.kind === 'closet') {
                 const it = (closet || []).find(x => x.id === ref.itemId);
                 if (it && !me.worn.some(e => e.itemId === it.id)) {
-                    const old = me.off.findIndex(e => e.itemId === it.id);
-                    if (old >= 0) me.off.splice(old, 1);
-                    me.worn.push(entryFromItem(it));
+                    me.worn.push(detachItem(chars, it.id, me.worn) || entryFromItem(it));
                     done.push(`+${it.name}`);
                 }
                 continue;
@@ -294,13 +350,45 @@ export function applyChanges(chars, changes, map, closet, cast = [], aliases = {
                 done.push(`+${f.e.name}`);
             }
         }
+        const removedSlots = new Set();
+        for (const id of [...asArr(ch.remove), ...asArr(ch.discard)]) {
+            const r = byId(id);
+            if (r?.kind === 'entry' && r.who === who) {
+                const e = [...me.worn, ...me.off].find(x => x.uid === r.uid);
+                if (e) removedSlots.add(normSlot(e.slot));
+            }
+        }
         for (const a of asArr(ch.add)) {
-            const name = typeof a === 'string' ? a : a?.name;
-            if (!String(name || '').trim()) continue;
-            if (me.worn.some(e => norm(e.name) === norm(name))) continue;
-            const fromOff = me.off.findIndex(e => norm(e.name) === norm(name));
-            if (fromOff >= 0) { me.worn.push(me.off.splice(fromOff, 1)[0]); done.push(`+${name}`); continue; }
-            me.worn.push(newEntry({ name, slot: typeof a === 'object' ? a.slot : 'other' }));
+            const name = String(typeof a === 'string' ? a : a?.name || '').trim();
+            if (!name) continue;
+            const want = { name, slot: normSlot(typeof a === 'object' ? a.slot : 'other') };
+            const best = (list) => {
+                let top = null, score = 0;
+                for (const e of list) { const sc = sameThing(want, e, ownerWords); if (sc > score) { top = e; score = sc; } }
+                return score >= SAME ? top : null;
+            };
+            // уже надето (та же вещь другими словами) — ничего не делаем
+            if (best(me.worn)) continue;
+            // причёска/макияж: одна на персонажа; без явной смены (remove) это та же самая
+            if (SINGLE.includes(want.slot) && me.worn.some(e => normSlot(e.slot) === want.slot) && !removedSlots.has(want.slot)) continue;
+            // лежит рядом у себя
+            let e = best(me.off);
+            if (e) { me.off.splice(me.off.indexOf(e), 1); me.worn.push(e); done.push(`+${e.name}`); continue; }
+            // у другого персонажа — переходит (передал, взял, накинул чужое)
+            let moved = null;
+            for (const [other, st] of Object.entries(chars)) {
+                if (other === who || !st) continue;
+                for (const list of ['worn', 'off']) {
+                    e = best(st[list] || []);
+                    if (e) { st[list].splice(st[list].indexOf(e), 1); moved = { e, from: other }; break; }
+                }
+                if (moved) break;
+            }
+            if (moved) { me.worn.push(moved.e); done.push(`+${moved.e.name} (от ${moved.from})`); continue; }
+            // есть в шкафу — надеваем вещь из шкафа
+            const it = best(closet || []);
+            if (it) { me.worn.push(detachItem(chars, it.id, me.worn) || entryFromItem(it)); done.push(`+${it.name}`); continue; }
+            me.worn.push(newEntry(want));
             done.push(`+${name}`);
         }
         for (const s of asArr(ch.state)) {
@@ -342,4 +430,81 @@ export function parseAliases(text) {
         if (n) map[n] = l.slice(i + 1).split(',').map(x => norm(x)).filter(Boolean);
     }
     return map;
+}
+
+/**
+ * Склеить дубли во всём чате: одна вещь шкафа — один экземпляр; «новое» без шкафа, похожее на известную вещь,
+ * заменяется этой вещью (остаётся там, где лежал дубль — это последнее состояние). Возвращает число склеек.
+ */
+export function dedupeChars(chars, closet = [], cast = [], aliases = {}) {
+    const ownerWords = ownerWordsOf([...cast, ...Object.keys(chars || {})], aliases);
+    let n = 0;
+    const all = () => {
+        const out = [];
+        for (const [who, st] of Object.entries(chars || {})) for (const list of ['worn', 'off']) for (const e of st?.[list] || []) out.push({ who, st, list, e });
+        return out;
+    };
+    // 1) одна вещь шкафа в нескольких местах — оставляем надетую
+    const byItem = new Map();
+    for (const x of all()) {
+        if (!x.e.itemId) continue;
+        const prev = byItem.get(x.e.itemId);
+        if (!prev) { byItem.set(x.e.itemId, x); continue; }
+        const drop = prev.list === 'worn' && x.list !== 'worn' ? x : prev;
+        drop.st[drop.list].splice(drop.st[drop.list].indexOf(drop.e), 1);
+        if (drop === prev) byItem.set(x.e.itemId, x);
+        n++;
+    }
+    // 2) «новое» (без шкафа), похожее на известную вещь или вещь шкафа
+    for (const x of all()) {
+        if (x.e.itemId) continue;
+        let match = null, score = 0;
+        for (const y of all()) {
+            if (y.e === x.e) continue;
+            const sc = sameThing(x.e, y.e, ownerWords);
+            if (sc > score && (y.e.itemId || y.e.img)) { match = y; score = sc; }
+        }
+        if (score >= SAME && match) {
+            match.st[match.list].splice(match.st[match.list].indexOf(match.e), 1);
+            x.st[x.list][x.st[x.list].indexOf(x.e)] = { ...match.e, state: x.e.state || match.e.state };
+            n++;
+            continue;
+        }
+        let it = null; score = 0;
+        for (const c of closet || []) { const sc = sameThing(x.e, c, ownerWords); if (sc > score) { it = c; score = sc; } }
+        if (score >= SAME && it && !all().some(y => y.e.itemId === it.id)) {
+            x.st[x.list][x.st[x.list].indexOf(x.e)] = { ...entryFromItem(it), state: x.e.state || '' };
+            n++;
+        }
+    }
+    // 3) две причёски / два макияжа надето сразу — оставляем известный (из шкафа), «новые» описания того же убираем
+    for (const st of Object.values(chars || {})) {
+        if (!st) continue;
+        for (const k of SINGLE) {
+            const worn = (st.worn || []).filter(e => normSlot(e.slot) === k);
+            if (worn.length < 2) continue;
+            const known = worn.filter(e => e.itemId);
+            const keep = known.length ? known[known.length - 1] : worn[worn.length - 1];
+            for (const e of worn) {
+                if (e === keep) continue;
+                st.worn.splice(st.worn.indexOf(e), 1);
+                if (e.itemId) st.off.push(e);
+                n++;
+            }
+        }
+    }
+    // 4) два одинаковых «новых» у одного персонажа — оставляем надетый
+    for (const st of Object.values(chars || {})) {
+        if (!st) continue;
+        for (const list of ['worn', 'off']) {
+            const arr = st[list] || [];
+            for (let i = arr.length - 1; i >= 0; i--) {
+                const e = arr[i];
+                if (e.itemId) continue;
+                const twin = [...st.worn, ...st.off].find(o => o !== e && sameThing(e, o, ownerWords) >= SAME);
+                if (twin && !(list === 'worn' && st.off.includes(twin))) { arr.splice(i, 1); n++; }
+            }
+        }
+    }
+    return n;
 }

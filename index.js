@@ -7,13 +7,13 @@
 import {
     SLOTS, slotOf, normSlot, isLook, uid, esc, cut, norm, clone, cleanText, extractJson,
     CLOTHES_RE, entryFromItem, newEntry, wearOutfit, stripClothes, sortBySlot, buildInjection,
-    WATCHER_SYSTEM, buildWatcherInput, applyChanges, ANALYZE_SYSTEM, parseAnalyzed, parseAliases,
+    WATCHER_SYSTEM, buildWatcherInput, applyChanges, ANALYZE_SYSTEM, parseAnalyzed, parseAliases, detachItem, dedupeChars,
 } from './core.js';
 import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, ATLAS_EDIT, resolveConnection, generateImage, itemPrompt, setPrompt, styleHasPerson } from './draw.js';
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 
 const DEFAULTS = {
     enabled: true,
@@ -685,9 +685,8 @@ function wearItem(who, it) {
     const st = charState(who);
     if (!st || !it) return;
     if (st.worn.some(e => e.itemId && e.itemId === it.id)) return;
-    const off = st.off.findIndex(e => e.itemId && e.itemId === it.id);
-    if (off >= 0) st.worn.push(st.off.splice(off, 1)[0]);
-    else st.worn.push(entryFromItem(it));
+    // вещь одна: если она у кого-то (надета или лежит рядом, в т.ч. у себя) — переходит, а не копируется
+    st.worn.push(detachItem(chatState()?.chars, it.id, st.worn) || entryFromItem(it));
 }
 
 function findEntry(who, entryUid) {
@@ -706,6 +705,14 @@ function applySets(who, sets, { replaceAll = false } = {}) {
     if (!st) return;
     const items = [];
     for (const set of sets) for (const id of set?.itemIds || []) items.push(closetItem(id));
+    const chars = chatState()?.chars || {};
+    for (const it of items) {
+        if (!it || st.worn.some(e => e.itemId === it.id) || st.off.some(e => e.itemId === it.id)) continue;
+        for (const [other, ost] of Object.entries(chars)) if (other !== who && ost) for (const list of ['worn', 'off']) {
+            const i = (ost[list] || []).findIndex(e => e.itemId === it.id);
+            if (i >= 0) ost[list].splice(i, 1);
+        }
+    }
     wearOutfit(st, items.filter(Boolean), { replaceAll });
 }
 
@@ -1209,6 +1216,7 @@ async function onClick(ev) {
                 ['strip', 'fa-person', 'Раздеть (📌, причёска и макияж останутся)'],
                 ['wear-off-all', 'fa-arrow-up', 'Надеть обратно всё снятое'],
                 ['save-as-set', 'fa-layer-group', 'Сохранить надетое как комплект'],
+                ['dedupe', 'fa-object-group', 'Склеить дубли во всём чате'],
                 ['wipe-who', 'fa-eraser', 'Очистить (ничего не записано)', '', true],
                 w?.extra?.includes(ui.who) ? ['remove-person', 'fa-user-minus', 'Убрать из сцены', '', true] : null,
             ]));
@@ -1246,6 +1254,13 @@ async function onClick(ev) {
             closeModal();
             commit({ manual: false });
             setBuilderModal(set);
+            break;
+        }
+        case 'dedupe': {
+            const w = chatState();
+            const n = w ? dedupeChars(w.chars, s.items, castNames(), parseAliases(s.aliases)) : 0;
+            closeModal(); commit();
+            window.toastr?.info(n ? `Склеила дублей: ${n}` : 'Дублей не нашла', '👗 Гардероб', { timeOut: 2500 });
             break;
         }
         case 'clear-off': { charState(ui.who).off = []; commit(); break; }
