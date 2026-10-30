@@ -72,7 +72,55 @@ export function extractJson(text) {
 }
 
 export function entryFromItem(it) {
-    return { uid: uid(), itemId: it.id || null, name: it.name, slot: normSlot(it.slot), desc: it.desc || '', img: it.img || '', state: '' };
+    const e = { uid: uid(), itemId: it.id || null, name: it.name, slot: normSlot(it.slot), desc: it.desc || '', img: it.img || '', state: '' };
+    if (it.pinned) e.pinned = true;
+    return e;
+}
+
+/** Платье конфликтует с верхом и низом: надел платье — снимаются топ и брюки, и наоборот. */
+const CONFLICT = { dress: ['top', 'bottom'], top: ['dress'], bottom: ['dress'] };
+
+/**
+ * Надеть набор вещей (один или несколько комплектов сразу).
+ * Обычный режим: заменяются только вещи тех же типов, что есть в наборе (бельё не трогает основной образ и наоборот).
+ * replaceAll: снять всю остальную одежду (причёска и макияж остаются, если их нет в наборе). Закреплённые (pinned) вещи не снимаются никогда.
+ * keepRemoved: снятое кладётся «рядом» (off), иначе убирается (оно и так в шкафу).
+ * Возвращает список снятых записей.
+ */
+export function wearOutfit(st, items, { replaceAll = false, keepRemoved = false } = {}) {
+    const incoming = [];
+    const seen = new Set();
+    for (const it of items || []) if (it && !seen.has(it.id)) { seen.add(it.id); incoming.push(it); }
+    const ids = new Set(incoming.map(it => it.id));
+    const slots = new Set();
+    for (const it of incoming) {
+        const k = normSlot(it.slot);
+        slots.add(k);
+        for (const x of CONFLICT[k] || []) slots.add(x);
+    }
+    const removed = [];
+    st.worn = (st.worn || []).filter(e => {
+        if (e.pinned) return true;
+        if (e.itemId && ids.has(e.itemId)) return true;
+        const k = normSlot(e.slot);
+        // «переодеть полностью» меняет одежду; причёску и макияж — только если они есть в наборе
+        if (slots.has(k) || (replaceAll && !isLook(k))) { removed.push(e); return false; }
+        return true;
+    });
+    st.off = (st.off || []).filter(e => !(e.itemId && ids.has(e.itemId)) && (!replaceAll || e.pinned));
+    if (keepRemoved) st.off.push(...removed);
+    for (const it of incoming) if (!st.worn.some(e => e.itemId === it.id)) st.worn.push(entryFromItem(it));
+    return removed;
+}
+
+/** «Раздеть»: снять одежду, но оставить закреплённое (кольца, пирсинг), причёску и макияж. */
+export function stripClothes(st) {
+    const keep = [];
+    const off = [];
+    for (const e of st.worn || []) (e.pinned || isLook(normSlot(e.slot)) ? keep : off).push(e);
+    st.worn = keep;
+    st.off = [...(st.off || []), ...off];
+    return off;
 }
 
 export function newEntry({ name, slot, desc = '', img = '' }) {
@@ -127,7 +175,8 @@ export const WATCHER_SYSTEM = `Ты — костюмер ролевой исто
 - Причёска (slot hair) и макияж (slot makeup) — тоже «вещи»: распустила хвост, заплела косу → remove старую причёску + add новую; смыла макияж → remove; размазалась тушь, растрепались волосы → state.
 - state — пометка на надетой вещи: {"id": "...", "state": "расстёгнута"}; пустая строка снимает пометку.
 - discard — id вещей, которые испорчены, выброшены или остались где-то насовсем.
-- «Разделся догола» = remove всех его worn. Переоделся в другое = remove старого + add/wear нового.
+- «Разделся догола» = remove всех его worn, КРОМЕ закреплённых (pinned), причёски (hair) и макияжа (makeup).
+- pinned: true — постоянные вещи (обручальное кольцо, пирсинг, жетоны): снимай их, только если в тексте прямо сказано, что сняли именно эту вещь. Переоделся в другое = remove старого + add/wear нового.
 - who — имя персонажа как в гардеробе. Если вещь надел персонаж, которого нет в гардеробе, всё равно укажи его имя.
 - note — 2–6 слов, что случилось («Баки снял куртку»).
 - Нет изменений — {"changes": []}.
@@ -151,6 +200,7 @@ export function buildWatcherInput(chars, cast, closet, { prev = '', message = ''
             map[id] = { kind: 'entry', who: name, uid: e.uid };
             const o = { id, name: e.name, slot: normSlot(e.slot) };
             if (e.state) o.state = e.state;
+            if (e.pinned) o.pinned = true;
             return o;
         });
         wardrobe[name] = { worn: pack(st.worn), off: pack(st.off) };

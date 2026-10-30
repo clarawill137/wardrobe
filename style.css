@@ -806,3 +806,47 @@
 }
 .wd-thumb.wd-drawing::before { width: 18px; height: 18px; left: calc(50% - 9px); top: calc(50% - 9px); border-width: 2px; }
 .wd-btn.danger i { color: #e06b6b; }
+
+/* ───── выбор нескольких комплектов, закреплённое ───── */
+.wd-setpick { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 12px; }
+.wd-setpick-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 10px 8px 8px;
+    border-radius: 14px;
+    border: 1px solid var(--wd-line);
+    background: var(--wd-softer);
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+}
+.wd-setpick-item.on {
+    border-color: var(--wd-accent);
+    background: var(--wd-acc-soft);
+}
+.wd-setpick-img {
+    flex: none;
+    width: 52px;
+    height: 52px;
+    border-radius: 12px;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    font-size: 26px;
+    background: var(--wd-soft);
+}
+.wd-setpick-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.wd-setpick-txt { flex: 1; min-width: 0; }
+.wd-tick {
+    flex: none;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: 1.5px solid var(--wd-line);
+    display: grid;
+    place-items: center;
+}
+.wd-setpick-item.on .wd-tick { background: var(--wd-accent); border-color: var(--wd-accent); }
+.wd-setpick-item.on .wd-tick::after { content: "✓"; color: var(--wd-solid); font-weight: 700; font-size: 14px; }
+.wd-pin { margin-right: 4px; font-size: 0.85em; }

@@ -6,14 +6,14 @@
 
 import {
     SLOTS, slotOf, normSlot, isLook, uid, esc, cut, norm, clone, cleanText, extractJson,
-    CLOTHES_RE, entryFromItem, newEntry, sortBySlot, buildInjection,
+    CLOTHES_RE, entryFromItem, newEntry, wearOutfit, stripClothes, sortBySlot, buildInjection,
     WATCHER_SYSTEM, buildWatcherInput, applyChanges, ANALYZE_SYSTEM, parseAnalyzed, parseAliases,
 } from './core.js';
 import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, ATLAS_EDIT, resolveConnection, generateImage, itemPrompt, setPrompt, styleHasPerson } from './draw.js';
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 
 const DEFAULTS = {
     enabled: true,
@@ -700,11 +700,25 @@ function findEntry(who, entryUid) {
     return null;
 }
 
-function applySet(who, set) {
+/** Надеть один или несколько комплектов: заменяются только вещи тех же типов, 📌 остаётся. */
+function applySets(who, sets, { replaceAll = false } = {}) {
     const st = charState(who);
-    if (!st || !set) return;
-    st.worn = set.itemIds.map(closetItem).filter(Boolean).map(entryFromItem);
-    st.off = [];
+    if (!st) return;
+    const items = [];
+    for (const set of sets) for (const id of set?.itemIds || []) items.push(closetItem(id));
+    wearOutfit(st, items.filter(Boolean), { replaceAll });
+}
+
+/** Закрепить/открепить вещь: на персонаже и в шкафу (чтобы в следующий раз надевалась уже закреплённой). */
+function setPinned(entryOrItemId, on) {
+    const it = closetItem(entryOrItemId);
+    if (it) { if (on) it.pinned = true; else delete it.pinned; saveSettings(); }
+    const w = chatState();
+    for (const st of Object.values(w?.chars || {})) {
+        for (const e of [...(st?.worn || []), ...(st?.off || [])]) {
+            if (e.itemId === entryOrItemId || e.uid === entryOrItemId) { if (on) e.pinned = true; else delete e.pinned; }
+        }
+    }
 }
 
 // ───────────── интерфейс ─────────────
@@ -754,7 +768,7 @@ function entryRow(e, list) {
     return `<div class="wd-row ${list === 'off' ? 'is-off' : ''}">
         ${thumb(e)}
         <div class="wd-row-main" data-act="entry-menu" data-uid="${esc(e.uid)}">
-            <div class="wd-row-name">${esc(e.name)}${e.itemId ? '' : ' <i class="wd-new" title="Нет в шкафу">новое</i>'}</div>
+            <div class="wd-row-name">${e.pinned ? '<span class="wd-pin" title="Закреплено: не снимается при смене комплекта">📌</span>' : ''}${esc(e.name)}${e.itemId ? '' : ' <i class="wd-new" title="Нет в шкафу">новое</i>'}</div>
             <div class="wd-row-meta">${meta}</div>
             ${e.desc ? `<div class="wd-row-desc">${esc(cut(e.desc, 110))}</div>` : ''}
         </div>
@@ -835,7 +849,7 @@ function itemCard(it, act = 'item-menu') {
     const sl = slotOf(it.slot);
     return `<button class="wd-card" data-act="${act}" data-id="${esc(it.id)}">
         ${thumb(it, 'wd-card-img')}
-        <div class="wd-card-name">${esc(it.name)}</div>
+        <div class="wd-card-name">${it.pinned ? '📌 ' : ''}${esc(it.name)}</div>
         <div class="wd-card-meta">${sl.i} ${esc(sl.t)}${it.owner ? ` · ${esc(shortName(it.owner))}` : ''}</div>
     </button>`;
 }
@@ -1002,6 +1016,7 @@ function entryMenu(entryUid) {
             <div class="wd-inline"><input type="text" data-input="ename" value="${esc(e.name)}"><button class="wd-btn" data-act="entry-rename" data-uid="${esc(e.uid)}">OK</button></div></div>
         ${menuList([
             f.list === 'worn' ? ['takeoff', 'fa-arrow-down', 'Снять (оставить рядом)', `data-uid="${esc(e.uid)}"`] : ['puton', 'fa-arrow-up', 'Надеть обратно', `data-uid="${esc(e.uid)}"`],
+            ['entry-pin', 'fa-thumbtack', e.pinned ? 'Открепить' : 'Закрепить 📌 (не снимать при смене комплекта и «Раздеть»)', `data-uid="${esc(e.uid)}"`],
             ['entry-give', 'fa-hand-holding', 'Отдать другому персонажу', `data-uid="${esc(e.uid)}"`],
             e.itemId ? null : ['entry-save', 'fa-box-archive', 'Сохранить в шкаф', `data-uid="${esc(e.uid)}"`],
             ['entry-del', 'fa-trash', 'Убрать совсем', `data-uid="${esc(e.uid)}"`, true],
@@ -1042,12 +1057,13 @@ function itemForm(it) {
             <div class="wd-field"><label>Тип</label>${slotSelect(it.slot)}</div>
             <div class="wd-field"><label>Чьё</label>${ownerSelect(it.owner)}</div>
         </div>
-        <div class="wd-field"><label>Описание</label><textarea rows="3" data-f="desc">${esc(it.desc)}</textarea></div>`;
+        <div class="wd-field"><label>Описание</label><textarea rows="3" data-f="desc">${esc(it.desc)}</textarea></div>
+        <label class="wd-switch"><input type="checkbox" data-f="pinned" ${it.pinned ? 'checked' : ''}><span></span>📌 Закреплённая вещь — кольца, пирсинг, жетоны: не снимается при смене комплекта и при «Раздеть»</label>`;
 }
 
 function readForm(box) {
     const v = (f) => box.querySelector(`[data-f="${f}"]`)?.value ?? '';
-    return { name: v('name').trim(), slot: v('slot'), owner: v('owner'), desc: v('desc').trim() };
+    return { name: v('name').trim(), slot: v('slot'), owner: v('owner'), desc: v('desc').trim(), pinned: !!box.querySelector('[data-f="pinned"]')?.checked };
 }
 
 /** Новая вещь / образ: текст, промпт или фото → ИИ раскладывает на вещи. */
@@ -1118,10 +1134,32 @@ function pickClosetModal() {
            <button class="wd-btn primary full" data-act="new-item"><i class="fa-solid fa-plus"></i> Добавить вещь</button>`);
 }
 
+function setCover(set) {
+    const first = set.itemIds.map(closetItem).find(it => it?.img);
+    const img = set.img || first?.img;
+    return `<div class="wd-setpick-img">${img ? `<img src="${esc(img)}" alt="" loading="lazy">` : '🎽'}</div>`;
+}
+
+function setSlotsText(set) {
+    const ks = [...new Set(set.itemIds.map(closetItem).filter(Boolean).map(it => normSlot(it.slot)))];
+    return ks.map(k => slotOf(k).i).join(' ');
+}
+
 function pickSetModal() {
     const sets = settings().sets;
-    openModal(`Комплект → ${esc(shortName(ui.who))}`, sets.length
-        ? `<div class="wd-hint-soft">Всё, что надето сейчас, заменится комплектом.</div>${menuList(sets.map(set => ['set-apply', 'fa-layer-group', esc(set.name), `data-id="${esc(set.id)}" data-name="${esc(ui.who)}"`]))}`
+    const who = ui.who;
+    const mine = sets.filter(x => !x.owner || x.owner === who);
+    const rest = sets.filter(x => x.owner && x.owner !== who);
+    openModal(`Комплекты → ${esc(shortName(who))}`, sets.length ? `
+        <div class="wd-hint-soft">Отметь один или несколько — например, бельё + основной. Заменятся только вещи тех же типов, а закреплённое 📌 останется.</div>
+        <div class="wd-setpick">${[...mine, ...rest].map(set => `
+            <button class="wd-setpick-item" data-act="setpick-toggle" data-id="${esc(set.id)}">
+                ${setCover(set)}
+                <div class="wd-setpick-txt"><div class="wd-set-name">${esc(set.name)}</div><div class="wd-row-meta">${set.itemIds.length} ${plural(set.itemIds.length, 'вещь', 'вещи', 'вещей')} · ${setSlotsText(set)}</div></div>
+                <span class="wd-tick"></span>
+            </button>`).join('')}</div>
+        <label class="wd-switch"><input type="checkbox" data-input="setall"><span></span>Переодеть полностью — снять всю остальную одежду (📌, причёска и макияж останутся)</label>
+        <button class="wd-btn primary full" data-act="sets-apply" data-name="${esc(who)}"><i class="fa-solid fa-shirt"></i> Надеть выбранные</button>`
         : `<div class="wd-empty"><div class="wd-empty-ico">🎽</div>Комплектов ещё нет.</div>`);
 }
 
@@ -1168,7 +1206,7 @@ async function onClick(ev) {
             const w = chatState();
             openModal(esc(ui.who), menuList([
                 ['face', 'fa-face-smile', s.faces[ui.who] ? 'Лицо для картинок (заменить)' : 'Лицо для картинок'],
-                ['strip', 'fa-person', 'Раздеть (всё снять)'],
+                ['strip', 'fa-person', 'Раздеть (📌, причёска и макияж останутся)'],
                 ['wear-off-all', 'fa-arrow-up', 'Надеть обратно всё снятое'],
                 ['save-as-set', 'fa-layer-group', 'Сохранить надетое как комплект'],
                 ['wipe-who', 'fa-eraser', 'Очистить (ничего не записано)', '', true],
@@ -1188,14 +1226,15 @@ async function onClick(ev) {
             break;
         }
         case 'face-del': { delete s.faces[ui.who]; saveSettings(); closeModal(); render(); break; }
-        case 'strip': { const st = charState(ui.who); st.off.push(...st.worn); st.worn = []; closeModal(); commit(); break; }
+        case 'strip': { stripClothes(charState(ui.who)); closeModal(); commit(); break; }
         case 'wear-off-all': { const st = charState(ui.who); st.worn.push(...st.off); st.off = []; closeModal(); commit(); break; }
         case 'wipe-who': { const st = charState(ui.who); st.worn = []; st.off = []; closeModal(); commit(); break; }
         case 'remove-person': { const w = chatState(); w.extra = w.extra.filter(x => x !== ui.who); delete w.chars[ui.who]; ui.who = ''; closeModal(); commit(); break; }
         case 'save-as-set': {
             const st = charState(ui.who);
-            if (!st.worn.length) { window.toastr?.info('На нём ничего нет', '👗 Гардероб'); break; }
-            const ids = st.worn.map(e => {
+            const toSave = st.worn.filter(e => !e.pinned);
+            if (!toSave.length) { window.toastr?.info('На нём ничего нет (кроме закреплённого)', '👗 Гардероб'); break; }
+            const ids = toSave.map(e => {
                 if (e.itemId && closetItem(e.itemId)) return e.itemId;
                 const it = addToCloset({ name: e.name, slot: e.slot, desc: e.desc, img: e.img, owner: ui.who });
                 e.itemId = it.id;
@@ -1264,8 +1303,22 @@ async function onClick(ev) {
             break;
         }
         case 'pick-set': pickSetModal(); break;
+        case 'setpick-toggle': el.classList.toggle('on'); break;
+        case 'sets-apply': {
+            const chosen = [...box.querySelectorAll('.wd-setpick-item.on')].map(x => s.sets.find(set => set.id === x.dataset.id)).filter(Boolean);
+            if (!chosen.length) { window.toastr?.info('Отметь хотя бы один комплект', '👗 Гардероб', { timeOut: 2000 }); break; }
+            applySets(name || ui.who, chosen, { replaceAll: !!box.querySelector('[data-input="setall"]')?.checked });
+            ui.who = name || ui.who;
+            ui.tab = 'worn';
+            closeModal(); commit(); break;
+        }
+        case 'entry-pin': {
+            const f = findEntry(ui.who, euid);
+            if (f) setPinned(f.e.itemId || f.e.uid, !f.e.pinned);
+            closeModal(); commit(); break;
+        }
         case 'set-apply': {
-            applySet(name || ui.who, s.sets.find(x => x.id === id));
+            applySets(name || ui.who, [s.sets.find(x => x.id === id)]);
             ui.who = name || ui.who;
             ui.tab = 'worn';
             closeModal(); commit(); break;
@@ -1285,6 +1338,7 @@ async function onClick(ev) {
             const it = closetItem(id);
             const f = readForm(box);
             if (it && f.name) Object.assign(it, { name: f.name, slot: normSlot(f.slot), owner: f.owner, desc: f.desc });
+            if (it && !!it.pinned !== f.pinned) { setPinned(it.id, f.pinned); saveChat(); updateInjection(); }
             saveSettings(); closeModal(); render(); break;
         }
         case 'item-del': {
@@ -1335,13 +1389,8 @@ async function onClick(ev) {
             const drawJobs = box.querySelector('[data-input="ndraw"]')?.checked && !(d.img && created.length === 1)
                 ? created.map(it => ({ id: it.id, ref: d.dataUrl || '' })) : [];
             if (el.dataset.wear && who) {
-                const st = charState(who);
-                // новый образ: то, что надето в тех же «ячейках» (верх, низ, обувь…), снимаем, потом надеваем всё новое
-                const slots = new Set(created.map(it => it.slot).filter(k => !['acc', 'other'].includes(k)));
-                for (const e of [...st.worn]) {
-                    if (slots.has(normSlot(e.slot))) { st.worn.splice(st.worn.indexOf(e), 1); st.off.push(e); }
-                }
-                for (const it of created) wearItem(who, it);
+                // новый образ: вещи тех же типов снимаются (лежат рядом), 📌 остаётся
+                wearOutfit(charState(who), created, { keepRemoved: true });
                 ui.who = who;
                 ui.tab = 'worn';
             }
