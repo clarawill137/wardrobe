@@ -13,7 +13,7 @@ import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, ATLAS_EDIT, resolveConnection,
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.6.1';
+const VERSION = '1.6.2';
 
 const DEFAULTS = {
     enabled: true,
@@ -1639,10 +1639,10 @@ let openedAt = 0;
 /** Один раз на чат после обновления: склеить дубли, которые набежали в старых версиях. */
 function autoDedupeOnce() {
     const w = chatState();
-    if (!w || w.dd161) return;
+    if (!w || w.dd162) return;
     const s = settings();
     const n = dedupeChars(w.chars, s.items, castNames(), parseAliases(s.aliases));
-    w.dd161 = true;
+    w.dd162 = true;
     saveChat();
     if (n) {
         updateInjection();

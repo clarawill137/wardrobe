@@ -105,6 +105,23 @@ export function sameThing(a, b, ownerWords = []) {
     return n / Math.min(A.size, B.size);
 }
 
+/**
+ * Та же вещь? Сравниваем название новой вещи с названием И описанием известной:
+ * «свободные брюки овсяного оттенка» = «свободные шерстяные брюки» (в описании: «…овсяного оттенка»).
+ * Чтобы описание не давало ложных совпадений, хотя бы одно слово названия известной вещи должно совпасть.
+ */
+export function matchScore(want, known, ownerWords = []) {
+    const byName = sameThing(want, known, ownerWords);
+    if (!slotsCompatible(want.slot, known.slot)) return 0;
+    const W = [...new Set(nameKey(want.name, ownerWords))];
+    if (W.length < 2) return byName;
+    const N = new Set(nameKey(known.name, ownerWords));
+    if (!W.some(w => N.has(w))) return byName;
+    const E = new Set([...N, ...nameKey(String(known.desc || '').slice(0, 220), ownerWords)]);
+    const cover = W.filter(w => E.has(w)).length / W.length;
+    return Math.max(byName, cover);
+}
+
 const SAME = 0.75;
 const SINGLE = ['hair', 'makeup']; // причёска и макияж — по одной на персонажа
 
@@ -263,6 +280,7 @@ export const WATCHER_SYSTEM = `Ты — костюмер ролевой исто
 - remove — id надетых вещей (из worn), которые сняли. Они не исчезают, а лежат рядом.
 - wear — id вещей, которые надели: из off этого персонажа, из worn/off ДРУГОГО персонажа (передал, отдал, взял, накинул чужое — вещь перейдёт к нему) или из шкафа (closet).
 - add — ТОЛЬКО совсем новые вещи, которых нет нигде: ни у кого в worn/off и ни в шкафу. {"name": "короткое название по-русски: цвет, материал, фасон", "slot": одно из [outer, dress, top, bottom, under, legwear, shoes, head, acc, hair, makeup, other]}.
+- Сначала сверь каждую упомянутую в тексте вещь с гардеробом и шкафом по названию И описанию (desc).
 - Текст часто описывает уже известную вещь другими словами («тоут», «её сумка», «помада цвета шоколада» при уже записанном макияже) — это та же вещь: используй её id или ничего не делай. Не добавляй её ещё раз через add и не добавляй имя владельца в название.
 - Причёска (slot hair) и макияж (slot makeup) — тоже «вещи»: распустила хвост, заплела косу → remove старую причёску + add новую; смыла макияж → remove; размазалась тушь, растрепались волосы → state.
 - state — пометка на надетой вещи: {"id": "...", "state": "расстёгнута"}; пустая строка снимает пометку.
@@ -292,6 +310,7 @@ export function buildWatcherInput(chars, cast, closet, { prev = '', message = ''
             const id = `w${++n}`;
             map[id] = { kind: 'entry', who: name, uid: e.uid };
             const o = { id, name: e.name, slot: normSlot(e.slot) };
+            if (e.desc) o.desc = cut(e.desc, 90);
             if (e.state) o.state = e.state;
             if (e.pinned) o.pinned = true;
             return o;
@@ -400,7 +419,7 @@ export function applyChanges(chars, changes, map, closet, cast = [], aliases = {
             const want = { name, slot: normSlot(typeof a === 'object' ? a.slot : 'other') };
             const best = (list) => {
                 let top = null, score = 0;
-                for (const e of list) { const sc = sameThing(want, e, ownerWords); if (sc > score) { top = e; score = sc; } }
+                for (const e of list) { const sc = matchScore(want, e, ownerWords); if (sc > score) { top = e; score = sc; } }
                 return score >= SAME ? top : null;
             };
             // уже надето (та же вещь другими словами) — ничего не делаем
@@ -503,7 +522,7 @@ export function dedupeChars(chars, closet = [], cast = [], aliases = {}) {
         for (const y of all()) {
             if (y.e === x.e) continue;
             if (y.who !== x.who && !canTake({ list: y.list, entry: y.e, wantName: x.e.name, from: y.who, to: x.who, closet, aliases })) continue;
-            const sc = sameThing(x.e, y.e, ownerWords);
+            const sc = matchScore(x.e, y.e, ownerWords);
             if (sc > score && (y.e.itemId || y.e.img)) { match = y; score = sc; }
         }
         if (score >= SAME && match) {
@@ -513,7 +532,7 @@ export function dedupeChars(chars, closet = [], cast = [], aliases = {}) {
             continue;
         }
         let it = null; score = 0;
-        for (const c of closet || []) { const sc = sameThing(x.e, c, ownerWords); if (sc > score) { it = c; score = sc; } }
+        for (const c of closet || []) { const sc = matchScore(x.e, c, ownerWords); if (sc > score) { it = c; score = sc; } }
         if (score >= SAME && it && !all().some(y => y.e.itemId === it.id)) {
             x.st[x.list][x.st[x.list].indexOf(x.e)] = { ...entryFromItem(it), state: x.e.state || '' };
             n++;
@@ -543,7 +562,7 @@ export function dedupeChars(chars, closet = [], cast = [], aliases = {}) {
             for (let i = arr.length - 1; i >= 0; i--) {
                 const e = arr[i];
                 if (e.itemId) continue;
-                const twin = [...st.worn, ...st.off].find(o => o !== e && sameThing(e, o, ownerWords) >= SAME);
+                const twin = [...st.worn, ...st.off].find(o => o !== e && matchScore(e, o, ownerWords) >= SAME);
                 if (twin && !(list === 'worn' && st.off.includes(twin))) { arr.splice(i, 1); n++; }
             }
         }
