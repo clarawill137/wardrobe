@@ -108,15 +108,51 @@ export function sameThing(a, b, ownerWords = []) {
 const SAME = 0.75;
 const SINGLE = ['hair', 'makeup']; // причёска и макияж — по одной на персонажа
 
+const TR = [['ck', 'к'], ['sh', 'ш'], ['ch', 'ч'], ['zh', 'ж'], ['th', 'т'], ['kh', 'х'], ['ya', 'я'], ['yu', 'ю'],
+    ['a', 'а'], ['b', 'б'], ['c', 'к'], ['d', 'д'], ['e', 'е'], ['f', 'ф'], ['g', 'г'], ['h', 'х'], ['i', 'и'], ['j', 'дж'], ['k', 'к'],
+    ['l', 'л'], ['m', 'м'], ['n', 'н'], ['o', 'о'], ['p', 'п'], ['q', 'к'], ['r', 'р'], ['s', 'с'], ['t', 'т'], ['u', 'у'], ['v', 'в'],
+    ['w', 'у'], ['x', 'кс'], ['y', 'и'], ['z', 'з']];
+/** Hedy → хеди, Barlow → барлоу: чтобы «сумка Хеди» узнавалась у персонажа с латинским именем. */
+export function translit(w) {
+    let s = String(w || '').toLowerCase();
+    if (!/[a-z]/.test(s)) return s;
+    for (const [a, b] of TR) s = s.split(a).join(b);
+    return s;
+}
+
+/** Все слова, которыми называют персонажа: имя карточки, прозвища, транслит. */
+export function charWords(name, aliases = {}) {
+    const out = new Set();
+    const add = (t) => { for (const w of norm(t).split(/[\s,]+/)) if (w.length > 1) { out.add(w); out.add(translit(w)); } };
+    add(name);
+    for (const [n, list] of Object.entries(aliases || {})) {
+        if (norm(n) === norm(name) || list.some(a => norm(name).split(/\s+/).includes(a))) { add(n); list.forEach(add); }
+    }
+    return out;
+}
+
 /** Слова, которые выкидываем при сравнении: имена персонажей и их прозвища. */
 export function ownerWordsOf(names = [], aliases = {}) {
     const out = new Set();
-    for (const n of names) for (const w of norm(n).split(/\s+/)) if (w.length > 1) out.add(w);
-    for (const [n, list] of Object.entries(aliases || {})) {
-        for (const w of norm(n).split(/\s+/)) if (w.length > 1) out.add(w);
-        for (const a of list) for (const w of norm(a).split(/\s+/)) if (w.length > 1) out.add(w);
-    }
+    for (const n of new Set([...names, ...Object.keys(aliases || {})])) for (const w of charWords(n, aliases)) out.add(w);
     return [...out];
+}
+
+/** Название вещи упоминает персонажа («сумка Хеди», «куртка Баки»)? */
+export function mentionsChar(itemName, charName, aliases = {}) {
+    const words = charWords(charName, aliases);
+    return norm(itemName).split(/[\s«»"'.,;:!?()\-–—/]+/).some(w => words.has(w) || words.has(w.replace(/(а|ы|ой|у|е)$/, '')));
+}
+
+/**
+ * Можно ли считать, что вещь перешла от другого персонажа, а не что у двоих просто похожие вещи:
+ * она у него лежит рядом (снята), или в названии упомянут он, или по шкафу это вещь нового владельца.
+ */
+export function canTake({ list, entry, wantName, from, to, closet = [], aliases = {} }) {
+    if (list === 'off') return true;
+    if (mentionsChar(wantName, from, aliases)) return true;
+    const owner = entry?.itemId ? (closet || []).find(x => x.id === entry.itemId)?.owner : '';
+    return !!owner && norm(owner) === norm(to);
 }
 
 /** Найти вещь по id шкафа у любого персонажа и вынуть её оттуда (вещь одна — не копируем). */
@@ -380,14 +416,19 @@ export function applyChanges(chars, changes, map, closet, cast = [], aliases = {
                 if (other === who || !st) continue;
                 for (const list of ['worn', 'off']) {
                     e = best(st[list] || []);
-                    if (e) { st[list].splice(st[list].indexOf(e), 1); moved = { e, from: other }; break; }
+                    if (e && canTake({ list, entry: e, wantName: name, from: other, to: who, closet, aliases })) {
+                        st[list].splice(st[list].indexOf(e), 1);
+                        moved = { e, from: other };
+                        break;
+                    }
                 }
                 if (moved) break;
             }
             if (moved) { me.worn.push(moved.e); done.push(`+${moved.e.name} (от ${moved.from})`); continue; }
             // есть в шкафу — надеваем вещь из шкафа
             const it = best(closet || []);
-            if (it) { me.worn.push(detachItem(chars, it.id, me.worn) || entryFromItem(it)); done.push(`+${it.name}`); continue; }
+            const holder = it ? Object.entries(chars).find(([n, st]) => n !== who && (st?.worn || []).some(x => x.itemId === it.id)) : null;
+            if (it && !holder) { me.worn.push(detachItem(chars, it.id, me.worn) || entryFromItem(it)); done.push(`+${it.name}`); continue; }
             me.worn.push(newEntry(want));
             done.push(`+${name}`);
         }
@@ -461,6 +502,7 @@ export function dedupeChars(chars, closet = [], cast = [], aliases = {}) {
         let match = null, score = 0;
         for (const y of all()) {
             if (y.e === x.e) continue;
+            if (y.who !== x.who && !canTake({ list: y.list, entry: y.e, wantName: x.e.name, from: y.who, to: x.who, closet, aliases })) continue;
             const sc = sameThing(x.e, y.e, ownerWords);
             if (sc > score && (y.e.itemId || y.e.img)) { match = y; score = sc; }
         }

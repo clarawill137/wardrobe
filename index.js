@@ -13,7 +13,7 @@ import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, ATLAS_EDIT, resolveConnection,
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.6.0';
+const VERSION = '1.6.1';
 
 const DEFAULTS = {
     enabled: true,
@@ -242,6 +242,8 @@ async function watchMessage(mesId, { force = false } = {}) {
         const j = extractJson(out);
         if (!j) throw new Error('костюмер ответил не JSON');
         notes = applyChanges(w.chars, j.changes || [], map, s.items, cast, parseAliases(s.aliases));
+        // подстраховка: если модель всё-таки записала известную вещь как новую — склеиваем сразу
+        dedupeChars(w.chars, s.items, cast, parseAliases(s.aliases));
     } catch (e) {
         console.warn('[Гардероб] костюмер:', e);
         window.toastr?.warning(String(e.message || e), '👗 Гардероб', { timeOut: 5000 });
@@ -1634,8 +1636,23 @@ function buildPanel() {
 
 let openedAt = 0;
 
+/** Один раз на чат после обновления: склеить дубли, которые набежали в старых версиях. */
+function autoDedupeOnce() {
+    const w = chatState();
+    if (!w || w.dd161) return;
+    const s = settings();
+    const n = dedupeChars(w.chars, s.items, castNames(), parseAliases(s.aliases));
+    w.dd161 = true;
+    saveChat();
+    if (n) {
+        updateInjection();
+        window.toastr?.info(`Склеила дублей: ${n}`, '👗 Гардероб', { timeOut: 3000 });
+    }
+}
+
 function openPanel(tab) {
     openedAt = Date.now();
+    try { autoDedupeOnce(); } catch (e) { console.warn('[Гардероб] склейка', e); }
     try {
         buildPanel();
         if (tab) ui.tab = tab;
@@ -1819,7 +1836,13 @@ jQuery(async () => {
         const t = setInterval(() => { if (addWandButton() || ++tries > 20) clearInterval(t); }, 500);
     }
     const { eventSource, eventTypes } = ctx();
-    eventSource.on(eventTypes.CHAT_CHANGED, () => { ui.who = ''; closeModal(); updateInjection(); render(); });
+    eventSource.on(eventTypes.CHAT_CHANGED, () => {
+        ui.who = '';
+        closeModal();
+        try { autoDedupeOnce(); } catch (e) { console.warn('[Гардероб] склейка', e); }
+        updateInjection();
+        render();
+    });
     eventSource.on(eventTypes.MESSAGE_RECEIVED, (mesId, type) => {
         if (type === 'impersonate') return;
         const id = Number(mesId);
