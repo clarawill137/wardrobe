@@ -13,7 +13,7 @@ import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, ATLAS_EDIT, resolveConnection,
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.6.2';
+const VERSION = '1.6.3';
 
 const DEFAULTS = {
     enabled: true,
@@ -1821,6 +1821,27 @@ function registerSlash() {
         }));
     } catch (e) { console.warn('[Гардероб] команда не зарегистрирована', e); }
 }
+
+// ───────────── API для других расширений (Life) ─────────────
+// Только то, что и так делают кнопки плашки: надеть комплект, открыть плашку, нарисовать обложку.
+window.Wardrobe = Object.freeze({
+    version: VERSION,
+    wearSets(who, setIds, { replaceAll = false } = {}) {
+        const s = settings();
+        const sets = (setIds || []).map(id => s.sets.find(x => x.id === id)).filter(Boolean);
+        if (!who || !sets.length || !chatState()) return false;
+        applySets(who, sets, { replaceAll });
+        commit();
+        return true;
+    },
+    open(tab, who) { if (who) ui.who = who; openPanel(tab); },
+    drawSet(setId) {
+        const conn = imgConnection();
+        if (conn.error) throw new Error(conn.error);
+        queueDraw([{ kind: 'set', id: setId }]);
+    },
+    isDrawing(id) { return drawing.has(id); },
+});
 
 window.addEventListener('error', (e) => {
     if (String(e?.filename || '').includes('/wardrobe/')) window.toastr?.error(esc(`${e.message} (${String(e.filename).split('/').pop()}:${e.lineno})`), '👗 Гардероб: ошибка', { timeOut: 15000 });
