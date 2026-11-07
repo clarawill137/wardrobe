@@ -13,7 +13,7 @@ import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, ATLAS_EDIT, resolveConnection,
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.6.3';
+const VERSION = '1.7.0';
 
 const DEFAULTS = {
     enabled: true,
@@ -676,11 +676,69 @@ function paintDrawing() {
 
 function closetItem(id) { return settings().items.find(x => x.id === id); }
 
+// ───────────── облик (ядро «Священный таймлайн») ─────────────
+// Один человек в разные эпохи — разные облики (сержант 1943-го и он же в 2024-м), и шкаф у каждого облика свой.
+// Вещь и комплект помнят облик владельца (slice); в чате эпохи видно своё и общее, «Все эпохи» — всё сразу.
+// Без ядра и вне мира — всё как раньше.
+
+let peopleMemo = { at: 0, v: {} };
+const people = () => {
+    // context() отдаёт копию — на отрисовку шкафа берём её раз в полсекунды, а не на каждую вещь
+    if (Date.now() - peopleMemo.at < 500) return peopleMemo.v;
+    let v = {};
+    try { v = globalThis.SacredTimeline?.context?.()?.people || {}; } catch { v = {}; }
+    peopleMemo = { at: Date.now(), v };
+    return v;
+};
+const sliceNow = (name) => (name && people()[name]?.slice) || null;
+const sliceLabel = (name) => (name && people()[name]?.label) || '';
+/** Видно ли вещь (комплект) в этом чате: общее, без облика, облик владельца сейчас тот же — или «Все эпохи». */
+function inEra(x) {
+    if (ui.allEras || !x?.slice || !x.owner) return true;
+    const now = sliceNow(x.owner);
+    return !now || now === x.slice;
+}
+const eraOn = () => Object.values(people()).some(p => p?.slice);
+
 function addToCloset({ name, slot, desc = '', img = '', owner = '' }) {
     const it = { id: uid(), name: cut(name, 80) || 'вещь', slot: normSlot(slot), desc: String(desc || '').trim(), img, owner, at: Date.now() };
+    const sl = sliceNow(owner);
+    if (sl) it.slice = sl;
     settings().items.unshift(it);
     saveSettings();
     return it;
+}
+
+// с этого дня в мире есть эпохи; всё, что легло в шкаф раньше, — из основной ролки
+const EPOCHS = Date.parse('2026-11-07T00:00:00Z');
+
+/** Старые вещи и комплекты — шкаф основной ролки: облик владельца в эпохе мира по умолчанию. Один раз. */
+async function migrateSlices() {
+    const s = settings();
+    const api = globalThis.SacredTimeline;
+    if (s.migrSlice || typeof api?.sliceAt !== 'function' || typeof api?.chronograph !== 'function') return;
+    const map = await api.chronograph().catch(() => null);
+    const base = map?.eras?.find(e => e.id === map.defaultEra)?.from;
+    if (!base) return;
+    const memo = new Map();
+    const atBase = async (owner) => {
+        if (!memo.has(owner)) memo.set(owner, (await api.sliceAt(owner, base).catch(() => null))?.slice || null);
+        return memo.get(owner);
+    };
+    let n = 0;
+    for (const it of s.items) {
+        if (it.slice || !it.owner || (it.at && it.at >= EPOCHS)) continue;
+        const sl = await atBase(it.owner);
+        if (sl) { it.slice = sl; n++; }
+    }
+    for (const set of s.sets) {
+        if (set.slice || !set.owner) continue;
+        const sl = await atBase(set.owner);
+        if (sl) { set.slice = sl; n++; }
+    }
+    s.migrSlice = true;
+    saveSettings();
+    if (n) console.log(`[Гардероб] облики: старым вещам и комплектам — шкаф основной ролки (${n})`);
 }
 
 function wearItem(who, it) {
@@ -732,7 +790,7 @@ function setPinned(entryOrItemId, on) {
 
 // ───────────── интерфейс ─────────────
 
-const ui = { open: false, tab: 'worn', who: '', q: '', slot: 'all', owner: 'all', draft: null };
+const ui = { open: false, tab: 'worn', who: '', q: '', slot: 'all', owner: 'all', draft: null, allEras: false };
 
 function profileOptions(selected, empty = '— выбери профиль —') {
     return `<option value="">${esc(empty)}</option>`
@@ -836,8 +894,8 @@ function ownersList() {
 
 function filteredItems() {
     const q = norm(ui.q);
-    return settings().items.filter(it =>
-        (ui.slot === 'all' || it.slot === ui.slot)
+    return settings().items.filter(it => inEra(it)
+        && (ui.slot === 'all' || it.slot === ui.slot)
         && (ui.owner === 'all' || (ui.owner === '' ? !it.owner : it.owner === ui.owner))
         && (!q || norm(`${it.name} ${it.desc} ${it.owner}`).includes(q)));
 }
@@ -851,7 +909,9 @@ function closetFilters() {
         <button class="wd-chip ${ui.owner === 'all' ? 'on' : ''}" data-act="owner" data-owner="all">все</button>
         <button class="wd-chip ${ui.owner === '' ? 'on' : ''}" data-act="owner" data-owner="">общее</button>
         ${ownersList().map(o => `<button class="wd-chip ${ui.owner === o ? 'on' : ''}" data-act="owner" data-owner="${esc(o)}">${esc(shortName(o))}</button>`).join('')}
-    </div>`;
+    </div>
+    ${eraOn() ? `<div class="wd-chips"><button class="wd-chip ${ui.allEras ? 'on' : ''}" data-act="all-eras">🕰 Все эпохи</button>
+        <span class="wd-hint-soft">${ui.allEras ? 'видно вещи всех обликов' : `шкаф этой эпохи${ui.owner && ui.owner !== 'all' && sliceLabel(ui.owner) ? ` — ${esc(cut(sliceLabel(ui.owner), 60))}` : ''}`}</span></div>` : ''}`;
 }
 
 function itemCard(it, act = 'item-menu') {
@@ -886,7 +946,7 @@ function renderSets() {
     return `<div class="wd-actions-row">
         <button class="wd-btn primary" data-act="set-new"><i class="fa-solid fa-plus"></i> Собрать комплект</button>
     </div>
-    ${s.sets.length ? `<div class="wd-sets">${s.sets.map(set => {
+    ${s.sets.filter(inEra).length ? `<div class="wd-sets">${s.sets.filter(inEra).map(set => {
         const its = set.itemIds.map(closetItem).filter(Boolean);
         return `<div class="wd-set">
             <div class="wd-set-head">
@@ -1132,7 +1192,7 @@ function readProposed(box) {
 
 function pickClosetModal() {
     const who = ui.who;
-    const items = settings().items;
+    const items = settings().items.filter(inEra);
     const mine = items.filter(it => !it.owner || it.owner === who);
     const rest = items.filter(it => it.owner && it.owner !== who);
     openModal(`Из шкафа → ${esc(shortName(who))}`, items.length ? `
@@ -1155,7 +1215,7 @@ function setSlotsText(set) {
 }
 
 function pickSetModal() {
-    const sets = settings().sets;
+    const sets = settings().sets.filter(inEra);
     const who = ui.who;
     const mine = sets.filter(x => !x.owner || x.owner === who);
     const rest = sets.filter(x => x.owner && x.owner !== who);
@@ -1178,7 +1238,7 @@ function setBuilderModal(set = null) {
         <div class="wd-field"><label>Название</label><input type="text" data-input="setname" value="${esc(set?.name || '')}" placeholder="например: Хеди — дома, уютное"></div>
         <div class="wd-field"><label>Чей</label>${ownerSelect(set?.owner || '', 'data-input="setowner"')}</div>
         <div class="wd-sec">Вещи <small>(тапай, чтобы выбрать)</small></div>
-        <div class="wd-grid small">${settings().items.map(it => `<button class="wd-card ${chosen.has(it.id) ? 'on' : ''}" data-act="set-toggle" data-id="${esc(it.id)}">${thumb(it, 'wd-card-img')}<div class="wd-card-name">${esc(it.name)}</div></button>`).join('')}</div>
+        <div class="wd-grid small">${settings().items.filter(inEra).map(it => `<button class="wd-card ${chosen.has(it.id) ? 'on' : ''}" data-act="set-toggle" data-id="${esc(it.id)}">${thumb(it, 'wd-card-img')}<div class="wd-card-name">${esc(it.name)}</div></button>`).join('')}</div>
         <button class="wd-btn primary full" data-act="set-save" ${set ? `data-id="${esc(set.id)}"` : ''}><i class="fa-solid fa-check"></i> Сохранить комплект</button>`);
 }
 
@@ -1250,7 +1310,7 @@ async function onClick(ev) {
                 e.itemId = it.id;
                 return it.id;
             });
-            const set = { id: uid(), name: `${shortName(ui.who)} — образ ${s.sets.length + 1}`, owner: ui.who, itemIds: ids };
+            const set = { id: uid(), name: `${shortName(ui.who)} — образ ${s.sets.length + 1}`, owner: ui.who, itemIds: ids, ...(sliceNow(ui.who) ? { slice: sliceNow(ui.who) } : {}) };
             s.sets.unshift(set);
             saveSettings();
             closeModal();
@@ -1343,6 +1403,7 @@ async function onClick(ev) {
 
         case 'slot': ui.slot = el.dataset.slot; render(); break;
         case 'owner': ui.owner = el.dataset.owner; render(); break;
+        case 'all-eras': ui.allEras = !ui.allEras; render(); break;
         case 'item-menu': itemMenu(id); break;
         case 'item-wear': {
             wearItem(name, closetItem(id));
@@ -1354,7 +1415,10 @@ async function onClick(ev) {
         case 'item-save': {
             const it = closetItem(id);
             const f = readForm(box);
-            if (it && f.name) Object.assign(it, { name: f.name, slot: normSlot(f.slot), owner: f.owner, desc: f.desc });
+            if (it && f.name) {
+                if (f.owner !== it.owner) { const sl = sliceNow(f.owner); if (sl) it.slice = sl; else delete it.slice; }
+                Object.assign(it, { name: f.name, slot: normSlot(f.slot), owner: f.owner, desc: f.desc });
+            }
             if (it && !!it.pinned !== f.pinned) { setPinned(it.id, f.pinned); saveChat(); updateInjection(); }
             saveSettings(); closeModal(); render(); break;
         }
@@ -1465,8 +1529,9 @@ async function onClick(ev) {
             const nm = box.querySelector('[data-input="setname"]').value.trim() || `Комплект ${s.sets.length + 1}`;
             const owner = box.querySelector('[data-input="setowner"]').value;
             const old = id ? s.sets.find(x => x.id === id) : null;
-            if (old) Object.assign(old, { name: nm, owner, itemIds: ids });
-            else s.sets.unshift({ id: uid(), name: nm, owner, itemIds: ids });
+            const sl = sliceNow(owner);
+            if (old) { if (owner !== old.owner) { if (sl) old.slice = sl; else delete old.slice; } Object.assign(old, { name: nm, owner, itemIds: ids }); }
+            else s.sets.unshift({ id: uid(), name: nm, owner, itemIds: ids, ...(sl ? { slice: sl } : {}) });
             saveSettings(); closeModal(); render(); break;
         }
         case 'set-menu': {
@@ -1835,6 +1900,10 @@ window.Wardrobe = Object.freeze({
         return true;
     },
     open(tab, who) { if (who) ui.who = who; openPanel(tab); },
+    /** Комплекты, которые видно в этом чате (облик эпохи + общие) — для Life. */
+    setsFor(who) { return settings().sets.filter(x => inEra(x) && (!who || !x.owner || x.owner === who)); },
+    /** Облик владельца в этом чате (ядро «Священный таймлайн»): { identity, slice, label } | null. */
+    sliceOf(name) { return people()[name] || null; },
     drawSet(setId) {
         const conn = imgConnection();
         if (conn.error) throw new Error(conn.error);
@@ -1859,7 +1928,9 @@ jQuery(async () => {
     const { eventSource, eventTypes } = ctx();
     eventSource.on(eventTypes.CHAT_CHANGED, () => {
         ui.who = '';
+        ui.allEras = false;
         closeModal();
+        migrateSlices().catch(e => console.warn('[Гардероб] облики', e));
         try { autoDedupeOnce(); } catch (e) { console.warn('[Гардероб] склейка', e); }
         updateInjection();
         render();
@@ -1871,6 +1942,8 @@ jQuery(async () => {
         if (m && !m.is_user) enqueue(id);
     });
     eventSource.on(eventTypes.MESSAGE_SWIPED, (mesId) => onSwiped(Number(mesId)));
+    // ядро узнало эпоху и облики этого чата — шкаф показывает своё
+    eventSource.on('sacred-timeline:changed', () => { if (ui.open) render(); });
     eventSource.on(eventTypes.MESSAGE_DELETED, (len) => onDeleted(len));
     if (eventTypes.GROUP_UPDATED) eventSource.on(eventTypes.GROUP_UPDATED, () => { updateInjection(); render(); });
     if (eventTypes.APP_READY) eventSource.on(eventTypes.APP_READY, () => { addWandButton(); updateInjection(); });
