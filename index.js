@@ -13,7 +13,7 @@ import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, ATLAS_EDIT, resolveConnection,
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.7.0';
+const VERSION = '1.7.1';
 
 const DEFAULTS = {
     enabled: true,
@@ -111,6 +111,26 @@ function castNames() {
     return names;
 }
 
+/**
+ * Карточка человека по имени. У одного человека бывает несколько карточек с одним и тем же именем — эпохи
+ * «Священного таймлайна», по карточке на год, — и первая по списку может оказаться из чужого года (лицо, рефы).
+ * Поэтому: та, что в этом чате (если их тут несколько — та, что назвало ядро по дате: people[имя].card), иначе
+ * базовая «Имя.png», иначе первая.
+ */
+function cardOf(name) {
+    const c = ctx();
+    const all = (c.characters || []).filter(x => x.name === name);
+    if (all.length < 2) return all[0] || null;
+    let here = [];
+    if (c.groupId) {
+        const g = (c.groups || []).find(x => x.id === c.groupId);
+        here = all.filter(x => (g?.members || []).includes(x.avatar));
+    } else if (all.includes(c.characters?.[c.characterId])) here = [c.characters[c.characterId]];
+    let want = null;
+    try { want = people()[name]?.card || null; } catch { /* модуль ещё грузится */ }
+    return here.find(x => x.avatar === want) || here[0] || all.find(x => x.avatar === `${name}.png`) || all[0];
+}
+
 function avatarUrl(name, { preferFace = false } = {}) {
     const c = ctx();
     if (preferFace) {
@@ -121,7 +141,7 @@ function avatarUrl(name, { preferFace = false } = {}) {
         const img = document.querySelector('#chat .mes[is_user="true"] .avatar img');
         return img?.getAttribute('src') || '';
     }
-    const ch = (c.characters || []).find(x => x.name === name);
+    const ch = cardOf(name);
     return ch?.avatar ? `/thumbnail?type=avatar&file=${encodeURIComponent(ch.avatar)}` : '';
 }
 
@@ -499,7 +519,7 @@ async function personRefFor(name) {
         }
     }
 
-    const ch = (c.characters || []).find(x => x.name === name);
+    const ch = cardOf(name);
     if (ch?.avatar) add(`/characters/${encodeURIComponent(ch.avatar)}`, 'аватарка карточки');
     else if (name === c.name1) {
         const t = avatarUrl(name);
