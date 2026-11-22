@@ -49,8 +49,14 @@ await page.evaluate(() => Wardrobe.open('sets', 'Хеди')); // как зовё
 await sleep(700);
 ok(await page.locator('#wd-panel.wd-full').count() === 1, 'Life «sets» открывает коллекцию на весь экран');
 ok(await page.locator('.wd-lk-who.on[data-name="Хеди"]').count() === 1, 'выбрана Хеди');
+s = await S();
+const own = (id) => s.sets.find(x => x.id === id).owner;
+ok(own('s7') === 'Хеди' && own('s8') === 'Хеди' && own('s9') === 'Хеди' && own('s5') === '', `владельцы разобраны: «Хеди, осень» → ${own('s7')}, «Летний вечер» (вещи Хеди) → ${own('s8')}, «Хеди — шуба» у Баки → ${own('s9')}, пижама — ${own('s5') || 'общая'}`);
+await page.waitForSelector('.wd-toast:has-text("Разобрала владельцев")', { timeout: 3000 }).then(() => ok(true, 'тост о разборе владельцев'), () => ok(false, 'тост о разборе владельцев'));
 const cardsHedy = await page.locator('.wd-lk-card').count();
-ok(cardsHedy === 5, `у Хеди 5 образов (4 своих + общий): ${cardsHedy}`);
+ok(cardsHedy === 8, `у Хеди 7 своих + 1 общий внизу: ${cardsHedy}`);
+ok((await page.locator('.wd-lk-sub').innerText()).includes('общих 1'), 'в шапке: «общих 1»');
+ok(await page.locator('.wd-lk-sec.shared ~ .wd-lk-grid .wd-lk-card').count() === 1, 'общий — отдельным блоком внизу');
 const chipTexts = await page.locator('.wd-lk-cats .wd-chip').allInnerTexts();
 console.log('    чипы:', chipTexts.map(t => t.replace(/\s+/g, ' ')).join(' | '));
 ok(['Офис', 'Вечернее', 'Спортивное'].every(c => chipTexts.some(t => t.includes(c))), 'её три раздела видны всегда');
@@ -65,8 +71,24 @@ await shot('03-cat-evening');
 await click('.wd-lk-cats .wd-chip:has-text("Все")');
 
 await click('.wd-lk-who[data-name="*"]');
-ok(await page.locator('.wd-lk-card').count() === 6, 'все персонажи — 6 образов');
+ok(await page.locator('.wd-lk-card').count() === 9, 'все персонажи — 9 образов');
 await shot('04-all');
+
+console.log('— у Баки только его образы');
+await click('.wd-lk-who[data-name="Bucky Barnes"]');
+const bucky = await page.locator('.wd-lk-card .wd-lk-name').allInnerTexts();
+ok(!bucky.some(t => /Хеди/.test(t)), `у Баки нет образов Хеди: ${bucky.join(' | ')}`);
+await shot('04b-bucky');
+await click('.wd-lk-sec.shared ~ .wd-lk-grid .wd-lk-owner');
+ok(await page.locator('.wd-modal-title').innerText().then(t => t.includes('Чей образ')), 'тап по «общий» — выбор владельца');
+await click('.wd-modal [data-act="look-owner-set"][data-name="Bucky Barnes"]');
+s = await S();
+ok(s.sets.find(x => x.id === 's5').owner === 'Bucky Barnes' && await page.locator('.wd-lk-sec.shared').count() === 0, 'пижама теперь у Баки, блок «Общие» пропал');
+await click('.wd-lk-card[data-id="s5"] .wd-lk-info');
+await page.locator('.wd-modal [data-f="owner"]').selectOption('');
+await click('.wd-modal [data-act="look-save"]');
+s = await S();
+ok(s.sets.find(x => x.id === 's5').owner === '', 'и обратно в общие через карточку');
 await click('.wd-lk-who[data-name="Хеди"]');
 
 console.log('— разложить по разделам (ИИ)');

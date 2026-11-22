@@ -41,6 +41,8 @@
         { id: 'i10', name: 'чёрные карго', slot: 'bottom', desc: '', owner: 'Bucky Barnes' },
         { id: 'i11', name: 'клетчатая пижама', slot: 'top', desc: 'фланель', owner: '' },
         { id: 'i12', name: 'обручальное кольцо', slot: 'acc', desc: 'платина', owner: 'Хеди', pinned: true },
+        { id: 'i13', name: 'бежевая шуба', slot: 'outer', desc: 'искусственный мех', owner: '' },
+        { id: 'i14', name: 'белый топ', slot: 'top', desc: '', owner: '' },
     ];
     const sets = [
         { id: 's1', name: 'Хеди — вечер, чёрное', owner: 'Хеди', itemIds: ['i1', 'i2', 'i3'], cat: 'Вечернее', img: img('oil1.png'), imgs: [img('clover43.jpg'), img('oil1.png')] },
@@ -49,6 +51,10 @@
         { id: 's4', name: 'Баки — тактика', owner: 'Bucky Barnes', itemIds: ['i9', 'i10'], cat: 'Миссия', img: img('clover43.jpg') },
         { id: 's5', name: 'Пижама на двоих', owner: '', itemIds: ['i11'], cat: 'Дом и сон' },
         { id: 's6', name: 'Хеди — дома', owner: 'Хеди', itemIds: ['i5', 'i7'] },
+        // как у неё: старые комплекты без владельца (прежний конструктор ставил «общее») и один не у того
+        { id: 's7', name: 'Хеди, осень', owner: '', itemIds: ['i13', 'i14'], cat: 'Повседневное', img: img('clover43.jpg') },
+        { id: 's8', name: 'Летний вечер', owner: '', itemIds: ['i8', 'i14'], cat: 'Повседневное' },
+        { id: 's9', name: 'Хеди — шуба', owner: 'Bucky Barnes', itemIds: ['i13'] },
     ];
     const extensionSettings = {
         wardrobe: {

@@ -566,6 +566,54 @@ export function catSystem(cats) {
 Для каждого образа по названию и вещам выбери ровно один раздел. Ответ — только JSON без пояснений: {"cats":{"l1":"Офис","l2":"Вечернее"}}`;
 }
 
+/** «Bucky Barnes 2014» → «bucky barnes»: один человек в разных эпохах («Священный таймлайн»). */
+export const baseName = (n) => norm(n).replace(/\s+(1[89]|20)\d\d$/, '').trim();
+
+/**
+ * Чей образ по названию: первое слово названия — имя или прозвище персонажа («Хеди, осень» → Хеди, «Баки — тактика» → Баки).
+ * Только первое слово: «Для свидания с Баки» — не про владельца. Несколько разных людей подходят — ''.
+ * prefer — кого брать, если подходят карточки одного человека из разных эпох (сначала сцена, потом у кого больше вещей).
+ */
+export function ownerFromTitle(title, candidates, aliases = {}, prefer = []) {
+    const tok = norm(title).replace(/[^\p{L}\p{N}\s-]+/gu, ' ').trim().split(/[\s-]+/)[0] || '';
+    if (tok.length < 3 || !/\p{L}/u.test(tok)) return '';
+    const hit = (w) => w.length >= 3 && /\p{L}/u.test(w)
+        && (w === tok || (w.length >= 4 && tok.length <= w.length + 3 && tok.startsWith(w.slice(0, Math.max(4, w.length - 1)))));
+    const hits = [...new Set(candidates.filter(Boolean))].filter(n => [...charWords(n, aliases)].some(hit));
+    if (!hits.length || new Set(hits.map(baseName)).size > 1) return '';
+    return prefer.find(n => hits.includes(n)) || hits[0];
+}
+
+/** Подсказки, чей образ: по названию и по владельцам его вещей (если все вещи одного человека). */
+export function guessLookOwner(set, items, candidates, aliases = {}, prefer = []) {
+    const byTitle = ownerFromTitle(set?.name, candidates, aliases, prefer);
+    const owners = [...new Set((set?.itemIds || []).map(id => items.find(i => i.id === id)?.owner).filter(Boolean))];
+    return { byTitle, byItems: owners.length === 1 ? owners[0] : '', owners };
+}
+
+/**
+ * Навести порядок с владельцами образов (меняет sets на месте, возвращает [{ set, from, to }]):
+ * - у «общего» образа владелец — по названию, иначе по вещам;
+ * - образ с владельцем, но в названии другой человек («Хеди — дома» у Баки), а вещи не владельца — переложить.
+ * Совсем непонятные остаются общими.
+ */
+export function fixLookOwners(sets, items, candidates, aliases = {}, prefer = []) {
+    const moved = [];
+    for (const set of sets || []) {
+        if (!set || set.pending) continue;
+        const g = guessLookOwner(set, items || [], candidates, aliases, prefer);
+        if (!set.owner) {
+            const to = g.byTitle || g.byItems;
+            if (to) { moved.push({ set, from: '', to }); set.owner = to; }
+        } else if (g.byTitle && baseName(g.byTitle) !== baseName(set.owner)
+            && (g.byItems === g.byTitle || !g.owners.some(o => baseName(o) === baseName(set.owner)))) {
+            moved.push({ set, from: set.owner, to: g.byTitle });
+            set.owner = g.byTitle;
+        }
+    }
+    return moved;
+}
+
 /** Образ надет целиком (все его вещи на персонаже)? */
 export function wornAll(st, set) {
     const ids = set?.itemIds || [];

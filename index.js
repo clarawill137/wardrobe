@@ -9,13 +9,13 @@ import {
     CLOTHES_RE, entryFromItem, newEntry, wearOutfit, stripClothes, sortBySlot, buildInjection,
     WATCHER_SYSTEM, buildWatcherInput, applyChanges, ANALYZE_SYSTEM, parseAnalyzed, parseAliases, detachItem, dedupeChars,
     matchScore, ownerWordsOf, DEFAULT_CATS, CORE_CATS, catList, matchCat, lookSystem, parseLook, catSystem, wornAll,
-    galleryOf, pushImg, stepImg, dropImg,
+    galleryOf, pushImg, stepImg, dropImg, fixLookOwners,
 } from './core.js';
 import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, ATLAS_EDIT, resolveConnection, generateImage, itemPrompt, setPrompt, styleHasPerson, styleShort, styleAspect } from './draw.js';
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.8.0';
+const VERSION = '1.8.1';
 
 const DEFAULTS = {
     enabled: true,
@@ -1159,11 +1159,68 @@ function lookWornBy(set, who) {
     return !!st && wornAll(st, set);
 }
 
-/** Образы на странице: выбранного персонажа (+ общие) или все. */
+/** Образы на странице: выбранного персонажа (только его) или все. */
 function looksShown() {
     const list = settings().sets.filter(inEra);
     if (!ui.lkWho || ui.lkWho === '*') return list;
-    return list.filter(x => !x.owner || x.owner === ui.lkWho);
+    return list.filter(x => x.owner === ui.lkWho);
+}
+
+/** Общие образы (без владельца) — у персонажа отдельным блоком внизу, не в его разделах. */
+function looksShared() {
+    if (!ui.lkWho || ui.lkWho === '*') return [];
+    return settings().sets.filter(x => inEra(x) && !x.owner);
+}
+
+/** Кто вообще может владеть образом: ты, сцена, все карточки, владельцы вещей и образов, прозвища. */
+function ownerCandidates() {
+    const s = settings();
+    const c = ctx();
+    const out = [];
+    const add = (n) => { if (n && !out.includes(n)) out.push(n); };
+    add(c.name1);
+    castNames().forEach(add);
+    (c.characters || []).forEach(x => add(x?.name));
+    s.sets.forEach(x => add(x.owner));
+    s.items.forEach(x => add(x.owner));
+    Object.keys(s.faces || {}).forEach(add);
+    Object.keys(parseAliases(s.aliases)).forEach(add);
+    const n = (name) => s.sets.filter(x => x.owner === name).length + s.items.filter(x => x.owner === name).length;
+    const cast = castNames();
+    const prefer = [...cast, ...out.filter(x => !cast.includes(x)).sort((a, b) => n(b) - n(a))];
+    return { list: out, prefer };
+}
+
+/**
+ * Разобрать владельцев образов: «общий» с «Хеди, …» в названии или с вещами Хеди — Хеди; «Хеди — дома» у Баки
+ * с не его вещами — Хеди. Совсем непонятные остаются общими. Возвращает, кого куда переложила.
+ */
+function runOwnerFix() {
+    const s = settings();
+    const { list, prefer } = ownerCandidates();
+    const moved = fixLookOwners(s.sets, s.items, list, parseAliases(s.aliases), prefer);
+    if (moved.length) saveSettings();
+    return moved;
+}
+
+function ownerFixText(moved) {
+    const by = {};
+    for (const m of moved) by[m.to] = (by[m.to] || 0) + 1;
+    const left = settings().sets.filter(x => !x.owner).length;
+    return `${Object.entries(by).map(([n, k]) => `${shortName(n)} — ${k}`).join(', ')}.${left ? ` Общими остались ${left}: их можно отдать тапом по «общий».` : ''}`;
+}
+
+/** Чей образ — выбор тапом по плашке «общий» / имени на карточке. */
+function ownerPickModal(id) {
+    const set = settings().sets.find(x => x.id === id);
+    if (!set) return;
+    const names = [...new Set([...lookOwners(), ...ownersList()])].filter(Boolean);
+    openModal(`Чей образ «${esc(cut(set.name, 34))}»?`, `
+        <div class="wd-people wrap">${names.map(n => `
+            <button class="wd-person ${n === set.owner ? 'on' : ''}" data-act="look-owner-set" data-id="${esc(id)}" data-name="${esc(n)}">${avatar(n)}<span>${esc(shortName(n))}</span></button>`).join('')}
+            <button class="wd-person ${!set.owner ? 'on' : ''}" data-act="look-owner-set" data-id="${esc(id)}" data-name=""><span class="wd-ava wd-ava-all">✦</span><span>общий</span></button>
+        </div>
+        <div class="wd-hint-soft">Общий образ виден у всех внизу страницы, в «Общих», а не в разделах персонажа.</div>`);
 }
 
 function looksIn(list, cat) {
@@ -1202,6 +1259,9 @@ function lookImgHtml(set) {
     return `<div class="wd-lk-ph">${tiles}${set.pending ? '' : '<small><i class="fa-solid fa-palette"></i> нарисовать образ</small>'}</div>`;
 }
 
+/** Плашка владельца на карточке: тап — выбрать, чей образ. */
+const ownerChip = (id, txt) => `<button class="wd-lk-owner" data-act="look-owner" data-id="${id}" title="Чей образ — сменить">${txt}<i class="fa-solid fa-caret-down"></i></button>`;
+
 function lookCard(set) {
     const id = esc(set.id);
     const gal = galleryOf(set);
@@ -1214,7 +1274,9 @@ function lookCard(set) {
         <div class="wd-lk-img${set.img ? '' : ' wd-noimg'}${drawing.has(set.id) ? ' wd-drawing' : ''}" data-act="look-open" data-id="${id}" data-draw-id="${id}" data-gal="${gal.length}">${lookImgHtml(set)}</div>
         <button class="wd-lk-info" data-act="look-open" data-id="${id}" title="Что в образе"><i class="fa-solid fa-shirt"></i></button>
         ${gal.length > 1 ? `<div class="wd-lk-dots">${gal.slice(-6).map(g => `<i class="${g === set.img ? 'on' : ''}"></i>`).join('')}</div>` : ''}
-        ${on ? '<div class="wd-lk-badge"><i class="fa-solid fa-check"></i> надето</div>' : ui.lkWho === '*' && set.owner ? `<div class="wd-lk-owner">${esc(shortName(set.owner))}</div>` : !set.owner ? '<div class="wd-lk-owner">общий</div>' : ''}
+        ${on ? '<div class="wd-lk-badge"><i class="fa-solid fa-check"></i> надето</div>'
+        : ui.lkWho === '*' && set.owner ? ownerChip(id, esc(shortName(set.owner)))
+            : !set.owner ? ownerChip(id, 'общий') : ''}
         ${busy ? '<div class="wd-lk-busy"><span class="wd-lk-spin"></span>ИИ разбирает образ…</div>' : ''}
         ${err && !busy ? `<button class="wd-lk-err" data-act="look-retry" data-id="${id}"><i class="fa-solid fa-rotate-right"></i> ${esc(cut(err, 46))}</button>` : ''}
         <div class="wd-lk-foot">
@@ -1231,6 +1293,13 @@ const lookGrid = (list) => `<div class="wd-lk-grid">${list.map(lookCard).join(''
 
 function renderLooks() {
     const s = settings();
+    // 1.8.1: старые комплекты без владельца (прежний конструктор ставил «общее») разложить по людям — один раз
+    if (!s.ownFix181) {
+        s.ownFix181 = true;
+        const moved = runOwnerFix();
+        saveSettings();
+        if (moved.length) setTimeout(() => toast('success', esc(`Разобрала владельцев образов: ${ownerFixText(moved)}`), '👗 Образы', { timeOut: 9000 }), 450);
+    }
     const owners = lookOwners();
     if (!ui.lkWho || (ui.lkWho !== '*' && !owners.includes(ui.lkWho))) {
         // по умолчанию: кто выбран на «На них», иначе — у кого больше всего образов, иначе первый из сцены
@@ -1240,6 +1309,7 @@ function renderLooks() {
         ui.lkWho = (ui.who && owners.includes(ui.who) ? ui.who : '') || (most && count(most) ? most : '') || owners.find(n => n !== me) || owners[0] || '*';
     }
     const all = looksShown();
+    const shared = looksShared();
     // только что добавленные (ИИ ещё разбирает или не разобрал) — наверху, а не в «Без раздела» в самом низу
     const fresh = all.filter(x => x.pending || x.err);
     const settled = all.filter(x => !x.pending && !x.err);
@@ -1265,7 +1335,7 @@ function renderLooks() {
             <button class="wd-lk-add" data-act="look-add"><i class="fa-solid fa-plus"></i> Образ</button>
         </div>
         <div class="wd-lk-sub">
-            <span><b>${esc(cut(whoName, 28))}</b> · ${all.length} ${plural(all.length, 'образ', 'образа', 'образов')}</span>
+            <span><b>${esc(cut(whoName, 28))}</b> · ${all.length} ${plural(all.length, 'образ', 'образа', 'образов')}${shared.length ? ` · общих ${shared.length}` : ''}</span>
             <button class="wd-lk-style" data-act="look-style" title="Стиль картинок"><i class="fa-solid fa-palette"></i> ${esc(styleShort(s))}</button>
         </div>
         <div class="wd-chips wd-lk-cats">
@@ -1277,6 +1347,11 @@ function renderLooks() {
         </div>
     </div>`;
 
+    const sharedSec = shared.length && ui.lkCat === 'all'
+        ? `<div class="wd-lk-sec shared"><span>✦ Общие</span><small>${shared.length}</small><button class="wd-link" data-act="look-ownfix">разобрать по владельцам</button></div>
+           <div class="wd-lk-shared-hint">Без владельца — видны у всех. Тап по «общий» на карточке — отдать персонажу.</div>${lookGrid(shared)}`
+        : '';
+
     if (!all.length) {
         return `${head}<div class="wd-lk-empty">
             <div class="wd-empty-ico">🎽</div>
@@ -1287,7 +1362,7 @@ function renderLooks() {
                 <button class="wd-btn" data-act="set-new"><i class="fa-solid fa-box-archive"></i> Собрать из шкафа</button>
                 ${ui.lkWho !== '*' && charState(ui.lkWho)?.worn?.length ? '<button class="wd-btn" data-act="look-from-worn"><i class="fa-solid fa-person-dress"></i> Что надето сейчас</button>' : ''}
             </div>
-        </div>`;
+        </div>${sharedSec}`;
     }
 
     const prof = s.watcherProfile || s.visionProfile;
@@ -1305,7 +1380,7 @@ function renderLooks() {
             : `<div class="wd-lk-empty small"><div class="wd-empty-ico">${catIcon(ui.lkCat)}</div>В разделе «${esc(label)}»${ui.lkWho !== '*' ? ` у ${esc(shortName(ui.lkWho))}` : ''} пока пусто.
                 <button class="wd-btn primary" data-act="look-add"><i class="fa-solid fa-plus"></i> Добавить образ</button></div>`;
     }
-    return `${head}${sortBtn}${body}<div class="wd-lk-tip">Свайп по картинке — прежние версии. 👕 — что в образе, промт и правка.</div>`;
+    return `${head}${sortBtn}${body}${sharedSec}<div class="wd-lk-tip">Свайп по картинке — прежние версии. 👕 — что в образе, промт и правка.</div>`;
 }
 
 /** Точечно обновить карточки образов (картинка дорисовалась, разбор закончился), не трогая прокрутку и модалку. */
@@ -1383,10 +1458,23 @@ function readCat(box, attr) {
     return v;
 }
 
+/** Чей новый образ по умолчанию: открытый персонаж, выбранный на «На них», у кого больше всего образов — не «общий». */
+function defaultOwner() {
+    if (ui.lkWho && ui.lkWho !== '*') return ui.lkWho;
+    if (ui.who) return ui.who;
+    const s = settings();
+    const count = (n) => s.sets.filter(x => x.owner === n).length;
+    const owners = lookOwners();
+    const most = [...owners].sort((a, b) => count(b) - count(a))[0];
+    if (most && count(most)) return most;
+    const me = ctx().name1;
+    return castNames().find(n => n !== me) || me || '';
+}
+
 /** «＋ Образ»: фото образа и/или готовый промт → ИИ разберёт за кадром. */
 function lookAddModal({ owner, cat } = {}) {
     const s = settings();
-    const who = owner ?? (ui.lkWho && ui.lkWho !== '*' ? ui.lkWho : ui.who || '');
+    const who = owner || defaultOwner();
     const c = cat ?? (['all', 'new', 'none'].includes(ui.lkCat) ? '' : ui.lkCat);
     const prof = s.visionProfile || s.watcherProfile;
     ui.draft = { kind: 'look', dataUrl: '', img: '', uploading: false };
@@ -1766,7 +1854,7 @@ function pickClosetModal() {
 /** Собрать образ из вещей шкафа (или поменять состав). */
 function setBuilderModal(set = null, { owner, cat } = {}) {
     const chosen = new Set(set?.itemIds || []);
-    const who = set ? set.owner : (owner ?? (ui.tab === 'looks' && ui.lkWho !== '*' ? ui.lkWho : ui.who || ''));
+    const who = set ? set.owner : (owner || defaultOwner());
     const c = set ? set.cat || '' : (cat ?? (ui.tab === 'looks' && !['all', 'new', 'none'].includes(ui.lkCat) ? ui.lkCat : ''));
     const items = settings().items.filter(inEra);
     // сначала вещи этого персонажа и общие, потом чужие
@@ -2109,6 +2197,27 @@ async function onClick(ev) {
             break;
         }
         case 'look-add': lookAddModal(); break;
+        case 'look-owner': ownerPickModal(id); break;
+        case 'look-owner-set': {
+            const set = s.sets.find(x => x.id === id);
+            if (!set) break;
+            const to = name || '';
+            if (to !== set.owner) {
+                const sl = sliceNow(to);
+                if (sl) set.slice = sl; else delete set.slice;
+                set.owner = to;
+                saveSettings();
+            }
+            closeModal(); render();
+            toast('success', esc(to ? `«${set.name}» — теперь у ${shortName(to)}` : `«${set.name}» — теперь общий`), '👗 Образы', { timeOut: 2200 });
+            break;
+        }
+        case 'look-ownfix': {
+            const moved = runOwnerFix();
+            render();
+            toast(moved.length ? 'success' : 'info', esc(moved.length ? `Разобрала: ${ownerFixText(moved)}` : 'По названиям и вещам не понять, чьи остальные, — отдай их тапом по «общий».'), '👗 Образы', { timeOut: 6000 });
+            break;
+        }
         case 'to-look-add': {
             const owner = box?.querySelector('[data-input="nowner"]')?.value || '';
             if (ui.tab !== 'looks') ui.prevTab = ui.tab;
