@@ -5,17 +5,22 @@
 
 // «Масло, полуреализм» (1.8, по её референсам): живопись маслом, полуреализм, тот же человек дважды на светлом фоне —
 // слева в полный рост анфас, справа крупнее, в три четверти от колен. Портрет 2:3.
-const OIL = 'Semi-realistic oil painting fashion illustration: painterly visible brushstrokes, softly blended skin, realistic anatomy and proportions, refined muted palette, fabrics painted with texture, folds and sheen.';
-const OIL_TWO = 'The same person is shown twice on one canvas: on the left a smaller full-body figure standing straight, front view, arms relaxed, from head to shoes fully in frame; on the right a larger three-quarter view of the same person from the knees up, body turned slightly, calm gaze at the viewer, the two figures slightly overlapping.';
-const OIL_BG = 'Plain light grey background with a subtle painted canvas texture, soft diffused daylight, gentle natural shadows. No props, no furniture, no text, no logo, no watermark, no frame, no doodles.';
+// Сверено с её референсами (22.11: белая и коричневая шубы): реалистичная живопись маслом — живое лицо настоящего человека,
+// мазки видны в волосах, мехе и ткани, мягкие края без контуров; гладкий светло-серый студийный фон. Прежний текст
+// («fashion illustration», «canvas texture») рисовал плоскую иллюстрацию с обводкой и текстурой холста.
+const OIL = 'Realistic oil painting, a contemporary fashion portrait painted digitally: true-to-life anatomy and proportions, the realistic face of a real person with natural skin, natural eye size and softly painted features, a calm model expression; loose confident brushstrokes visible in the hair, fur and fabric, glossy painted highlights on leather, satin and jewellery, soft edges everywhere, smooth blended skin, rich true-to-life colour.';
+const OIL_TWO = 'The same person appears twice on one tall canvas: on the left a full-length figure standing in a relaxed fashion pose, head to shoes fully in frame, with a soft shadow on the floor; on the right the same person larger and closer in a three-quarter view from mid-thigh up, cropped by the right and bottom edges of the canvas and slightly overlapping the left figure, calm gaze toward the viewer.';
+const OIL_BG = 'Smooth plain light grey seamless studio backdrop with a faint gradient, soft diffused daylight, gentle natural shadows; only the figures on the empty backdrop.';
 
 export const STYLES = {
     oil: {
         t: 'Масло, полуреализм — два ракурса',
         short: 'Масло',
-        d: 'масляная живопись, полуреализм: в полный рост и крупнее в три четверти, светлый фон',
+        d: 'реалистичная живопись маслом: живое лицо, мазки на волосах, мехе и ткани; в полный рост и крупнее до бёдер, светло-серый фон',
         person: true,
         aspect: '2:3',
+        // реф лица бывает рисованным — от него берётся только кто это, а пишется лицо этим маслом
+        refNote: 'Take only the identity from the reference image; whatever style it is in, paint this person realistically in the oil manner described above.',
         p: `${OIL} One person wearing this item, with simple plain neutral basics for the rest of the outfit. ${OIL_TWO} ${OIL_BG}`,
         set: `${OIL} One person wearing this complete outfit. ${OIL_TWO} ${OIL_BG}`,
         look: `${OIL} One person shown twice to showcase the {kind} clearly: on the left a three-quarter view, on the right a larger head-and-shoulders close-up from the front, calm gaze at the viewer. ${OIL_BG}`,
@@ -157,6 +162,7 @@ export function itemPrompt(it, s, { personRef = false, photoRef = false } = {}) 
     }
     if (personRef && photoRef) lines.push('Two images are attached: image 1 is the person, image 2 is the photo of the item.');
     if (personRef) lines.push(PERSON_REF_RULE + (kind === 'hairstyle' ? ' Change only the hairstyle.' : kind === 'makeup' ? ' Change only the makeup.' : styleDetail(s, it.slot) ? ' Put this piece on them.' : ' Dress them in this item.'));
+    if (personRef && STYLES[s.imgStyle]?.refNote) lines.push(STYLES[s.imgStyle].refNote);
     if (photoRef) lines.push('The attached photo shows the real item (maybe as part of a whole outfit): reproduce ONLY this item from it, keeping its exact colour, fabric and details.');
     return lines.join('\n');
 }
@@ -176,6 +182,7 @@ export function setPrompt(set, items, s, { itemRefs = false, personRef = false, 
                 : `A neat flat-lay composition of one complete outfit "${set.name}", made of exactly these pieces, each fully visible:\n${list}`);
     } else if (!person) lines.push(`A neat flat-lay composition of this complete outfit, each piece fully visible.`);
     if (personRef) lines.push(`${PERSON_REF_RULE} Dress them in this outfit.`);
+    if (personRef && STYLES[s.imgStyle]?.refNote) lines.push(STYLES[s.imgStyle].refNote);
     if (outfitRef) {
         lines.push(person
             ? `The ${personRef ? 'second' : ''} attached image shows this exact outfit worn by someone else: reproduce the clothes faithfully — the same pieces, colours, fabrics, cut, length and accessories — ${personRef ? 'on the person from the first image' : 'on a person'}. Ignore that other person's face, hair and body, and do not copy its background or art style.`.replace('The  ', 'The ')
