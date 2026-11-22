@@ -7,10 +7,10 @@
 - `prep.mjs` — картинки в `samples/` (свои 2:3 — `samples/oil1.png`, `samples/oil2.png`, в репу не коммитить; без них — заглушки).
 - `server.mjs` — статика + заглушки `/api/images/upload`, `/thumbnail`, `/characters`, `/User Avatars`.
 - `index.html` — мок `SillyTavern.getContext()` (профиль, шкаф, образы, чат-группа), ИИ-разбор и OpenRouter-картинки подменены.
-- `run.mjs` — основной прогон (≈40 проверок + скриншоты в `shots/`), `extra.mjs` — побочные пути.
+- `run.mjs` — основной прогон (≈50 проверок + скриншоты в `shots/`), `extra.mjs` — побочные пути, `era.mjs` — эпохи (мок ядра «Священный таймлайн» 2024 ↔ 1943, рефы SLAY).
 
 ```
-node tools/stand/prep.mjs && node tools/stand/run.mjs && node tools/stand/extra.mjs
+node tools/stand/prep.mjs && node tools/stand/run.mjs && node tools/stand/extra.mjs && node tools/stand/era.mjs
 ```
 
 Нужны node 22, Chrome (`CHROME`, по умолчанию `/usr/bin/google-chrome`), playwright и sharp (`NODE_TOOLS` — папка

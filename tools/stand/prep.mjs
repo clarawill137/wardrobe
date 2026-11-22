@@ -25,4 +25,5 @@ const b = await sharp(S('oil2.png')).resize({ height: 600 }).toBuffer();
 await sharp({ create: { width: 800, height: 600, channels: 3, background: '#111' } }).composite([{ input: a, left: 0, top: 0 }, { input: b, left: 400, top: 0 }]).jpeg().toFile(S('clover43.jpg'));
 await sharp(S('oil1.png')).extract({ left: 420, top: 300, width: 420, height: 420 }).jpeg().toFile(S('item_sq.jpg'));
 await sharp(S('oil2.png')).extract({ left: 420, top: 250, width: 420, height: 420 }).jpeg().toFile(S('item_sq2.jpg'));
+await sharp({ create: { width: 64, height: 64, channels: 3, background: '#7a4a2a' } }).png().toFile(S('rb64.png'));
 console.log('samples готовы:', fs.readdirSync(path.join(HERE, 'samples')).join(', '));

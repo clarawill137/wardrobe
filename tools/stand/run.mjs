@@ -54,7 +54,7 @@ const own = (id) => s.sets.find(x => x.id === id).owner;
 ok(own('s7') === 'Хеди' && own('s8') === 'Хеди' && own('s9') === 'Хеди' && own('s5') === '', `владельцы разобраны: «Хеди, осень» → ${own('s7')}, «Летний вечер» (вещи Хеди) → ${own('s8')}, «Хеди — шуба» у Баки → ${own('s9')}, пижама — ${own('s5') || 'общая'}`);
 await page.waitForSelector('.wd-toast:has-text("Разобрала владельцев")', { timeout: 3000 }).then(() => ok(true, 'тост о разборе владельцев'), () => ok(false, 'тост о разборе владельцев'));
 const cardsHedy = await page.locator('.wd-lk-card').count();
-ok(cardsHedy === 8, `у Хеди 7 своих + 1 общий внизу: ${cardsHedy}`);
+ok(cardsHedy === 9, `у Хеди 8 своих + 1 общий внизу: ${cardsHedy}`);
 ok((await page.locator('.wd-lk-sub').innerText()).includes('общих 1'), 'в шапке: «общих 1»');
 ok(await page.locator('.wd-lk-sec.shared ~ .wd-lk-grid .wd-lk-card').count() === 1, 'общий — отдельным блоком внизу');
 const chipTexts = await page.locator('.wd-lk-cats .wd-chip').allInnerTexts();
@@ -71,7 +71,7 @@ await shot('03-cat-evening');
 await click('.wd-lk-cats .wd-chip:has-text("Все")');
 
 await click('.wd-lk-who[data-name="*"]');
-ok(await page.locator('.wd-lk-card').count() === 9, 'все персонажи — 9 образов');
+ok(await page.locator('.wd-lk-card').count() === 10, 'все персонажи — 10 образов');
 await shot('04-all');
 
 console.log('— у Баки только его образы');

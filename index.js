@@ -15,7 +15,7 @@ import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, ATLAS_EDIT, resolveConnection,
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.8.1';
+const VERSION = '1.8.2';
 
 const DEFAULTS = {
     enabled: true,
@@ -292,7 +292,7 @@ async function watchMessage(mesId, { force = false } = {}) {
         const pm = chat[i];
         if (pm && !pm.is_system && pm.extra?.type !== 'comment') prev = cleanText(pm.mes);
     }
-    const { text: input, map } = buildWatcherInput(w.chars, cast, s.items, { prev, message: text, speaker: m.name });
+    const { text: input, map } = buildWatcherInput(w.chars, cast, s.items.filter(x => inEra(x, true)), { prev, message: text, speaker: m.name });
 
     setFabBusy(true);
     let notes = [];
@@ -468,7 +468,8 @@ async function analyzeLook({ text = '', dataUrl = '', withLook = false }) {
 function linkItems(list, owner, slice, lookId) {
     const s = settings();
     const ow = ownerWordsOf([...castNames(), owner].filter(Boolean), parseAliases(s.aliases));
-    const pool = s.items.filter(it => (!it.owner || it.owner === owner) && (!slice || !it.slice || it.slice === slice));
+    // своё — того же облика, общее — этой эпохи (вещи из других эпох не подбираем)
+    const pool = s.items.filter(it => (it.owner ? it.owner === owner && (!slice || !it.slice || it.slice === slice) : inEra(it, true)));
     const ids = [];
     const created = [];
     for (const x of list) {
@@ -622,6 +623,19 @@ function canDraw() {
  * сохранённые персонажи SLAY → рефы SLAY (по персонажам и общие) → лорбуки рефов sillyimages → аватарка.
  * Возвращает { dataUrl, from } или null.
  */
+/**
+ * Ключ «Лица для картинок»: в основной ролке и вне мира — имя (как было), в других эпохах — имя@облик:
+ * у облика 1943-го своё лицо, не то, что загружено для 2024-го.
+ */
+function faceKey(name) {
+    const sl = sliceNow(name);
+    return offDefault() && sl ? `${name}@${sl}` : name;
+}
+
+/** base64 из лорбука рефов SLAY → data URL (тип — по первым байтам). */
+const b64Url = (b) => (!b ? '' : String(b).startsWith('data:') ? String(b)
+    : `data:${/^iVBOR/.test(b) ? 'image/png' : /^UklGR/.test(b) ? 'image/webp' : 'image/jpeg'};base64,${b}`);
+
 async function personRefFor(name) {
     if (!name) return null;
     const c = ctx();
@@ -634,7 +648,18 @@ async function personRefFor(name) {
     const found = [];
     const add = (path, from) => { if (path) found.push({ path, from }); };
 
-    add(s.faces?.[name], 'лицо из гардероба');
+    // другая эпоха мира: сначала то, что знает облик — своё лицо этого облика, лорбук рефов SLAY (он сам
+    // выбирает облик по ядру), карточка этой эпохи; лицо, загруженное для основной ролки, — только в самом конце
+    const past = offDefault();
+    if (past) {
+        add(s.faces?.[faceKey(name)], 'лицо этого облика');
+        try {
+            const rb = globalThis.slayRefBook;
+            for (const e of (rb?.match?.(name) || []).slice(0, 2)) found.push({ get: async () => b64Url(await rb.image(e)), from: 'рефы SLAY по облику' });
+        } catch { /* без лорбука рефов */ }
+        const ch0 = cardOf(name);
+        if (ch0?.avatar) add(`/characters/${encodeURIComponent(ch0.avatar)}`, 'аватарка карточки этой эпохи');
+    } else add(s.faces?.[name], 'лицо из гардероба');
 
     const sl = ext.slay_image_gen || {};
     for (const ch of Array.isArray(sl.savedChars) ? sl.savedChars : []) {
@@ -667,6 +692,7 @@ async function personRefFor(name) {
     }
 
     const ch = cardOf(name);
+    if (past) add(s.faces?.[name], 'лицо из гардероба (основная ролка)');
     if (ch?.avatar) add(`/characters/${encodeURIComponent(ch.avatar)}`, 'аватарка карточки');
     else if (name === c.name1) {
         const t = avatarUrl(name);
@@ -676,9 +702,13 @@ async function personRefFor(name) {
         else if (t) add(t, 'аватарка персоны');
     }
 
-    for (const { path, from } of found) {
-        const u = /^(\/|https?:|data:)/.test(path) ? path : `/${path}`;
-        try { return { dataUrl: await toJpeg(await urlToDataUrl(u), 768, 0.86), from }; } catch { /* следующий */ }
+    for (const { path, get, from } of found) {
+        try {
+            const raw = get ? await get() : path;
+            if (!raw) continue;
+            const u = /^(\/|https?:|data:)/.test(raw) ? raw : `/${raw}`;
+            return { dataUrl: await toJpeg(u.startsWith('data:') ? u : await urlToDataUrl(u), 768, 0.86), from };
+        } catch { /* следующий */ }
     }
     return null;
 }
@@ -876,53 +906,143 @@ const people = () => {
 };
 const sliceNow = (name) => (name && people()[name]?.slice) || null;
 const sliceLabel = (name) => (name && people()[name]?.label) || '';
-/** Видно ли вещь (комплект) в этом чате: общее, без облика, облик владельца сейчас тот же — или «Все эпохи». */
-function inEra(x) {
-    if (ui.allEras || !x?.slice || !x.owner) return true;
+
+// с этого дня в мире есть эпохи; всё, что легло в шкаф раньше, — из основной ролки
+const EPOCHS = Date.parse('2026-11-07T00:00:00Z');
+
+// эпоха этого чата и эпоха мира по умолчанию (основная ролка) — по ядру; без ядра или вне мира — ''
+let eraMemo = { at: 0, cur: '', def: '' };
+function eraIds() {
+    if (Date.now() - eraMemo.at < 500) return eraMemo;
+    let cx = null;
+    try { cx = globalThis.SacredTimeline?.context?.() || null; } catch { cx = null; }
+    eraMemo = { at: Date.now(), cur: String(cx?.era?.id || ''), def: String(cx?.world?.defaultEra || '') };
+    return eraMemo;
+}
+const eraNow = () => eraIds().cur;
+/** Чат — не в основной ролке, а в другой эпохе мира (1943, 2013, 2014…). */
+const offDefault = () => { const e = eraIds(); return !!e.cur && !!e.def && e.cur !== e.def; };
+/** Когда вещь или образ появились: at, иначе — время из id (uid начинается с Date.now()). 0 — не знаем. */
+function bornAt(x) {
+    if (x?.at) return Number(x.at) || 0;
+    const t = parseInt(String(x?.id || '').slice(0, -6), 36);
+    return t > 1.5e12 && t < 4e12 ? t : 0;
+}
+/** Эпоха общей (ничьей) вещи: своя метка; старое, до эпох, — основной ролки; новое без метки — видно везде. */
+function sharedEra(x) {
+    if (x?.era) return String(x.era);
+    const t = bornAt(x);
+    return !t || t < EPOCHS ? eraIds().def : '';
+}
+
+/**
+ * Видно ли вещь (образ) в этом чате. Своё — по облику владельца (облик 1943-го ≠ он же в 2024-м); общее — общее
+ * внутри эпохи (пижама 2024-го не всплывает в сороковых). «Все эпохи» — всё. strict — без «Все эпохи» (для модели).
+ */
+function inEra(x, strict = false) {
+    if (!x || (!strict && ui.allEras)) return true;
+    if (!x.owner) {
+        const cur = eraNow();
+        const e = cur ? sharedEra(x) : '';
+        return !cur || !e || e === cur;
+    }
+    if (!x.slice) return true;
     const now = sliceNow(x.owner);
     return !now || now === x.slice;
 }
-const eraOn = () => Object.values(people()).some(p => p?.slice);
+const eraOn = () => Object.values(people()).some(p => p?.slice) || !!eraNow();
+
+/** Владелец сменился — облик (или эпоха общего) под нового. */
+function retag(x, owner) {
+    if (owner) {
+        delete x.era;
+        const sl = sliceNow(owner);
+        if (sl) x.slice = sl; else delete x.slice;
+    } else {
+        delete x.slice;
+        const e = eraNow();
+        if (e) x.era = e; else delete x.era;
+    }
+}
 
 function addToCloset({ name, slot, desc = '', img = '', owner = '' }) {
     const it = { id: uid(), name: cut(name, 80) || 'вещь', slot: normSlot(slot), desc: String(desc || '').trim(), img, owner, at: Date.now() };
-    const sl = sliceNow(owner);
-    if (sl) it.slice = sl;
+    retag(it, owner);
     settings().items.unshift(it);
     saveSettings();
     return it;
 }
 
-// с этого дня в мире есть эпохи; всё, что легло в шкаф раньше, — из основной ролки
-const EPOCHS = Date.parse('2026-11-07T00:00:00Z');
+/** Облик человека в эпохе мира по умолчанию (основная ролка) — для старых вещей и образов. null — ядра нет. */
+let baseMemo = { map: null, at: 0, slices: new Map() };
+/** Начало эпохи мира по умолчанию (ядро: chronograph) или '' — ядра нет / ещё не готово. */
+async function baseDate() {
+    const api = globalThis.SacredTimeline;
+    if (typeof api?.sliceAt !== 'function' || typeof api?.chronograph !== 'function') return '';
+    if (!baseMemo.map || Date.now() - baseMemo.at > 60000) {
+        baseMemo = { map: await api.chronograph().catch(() => null), at: Date.now(), slices: new Map() };
+    }
+    const map = baseMemo.map;
+    return String(map?.eras?.find(e => e.id === map.defaultEra)?.from || '');
+}
+/** { identity, slice } человека в основной ролке (память на минуту). */
+async function baseOf(owner) {
+    const base = owner ? await baseDate() : '';
+    if (!base) return null;
+    if (!baseMemo.slices.has(owner)) baseMemo.slices.set(owner, (await globalThis.SacredTimeline.sliceAt(owner, base).catch(() => null)) || null);
+    return baseMemo.slices.get(owner);
+}
+async function baseSlice(owner) { return (await baseOf(owner))?.slice || null; }
 
-/** Старые вещи и комплекты — шкаф основной ролки: облик владельца в эпохе мира по умолчанию. Один раз. */
+/**
+ * Старые вещи и образы — шкаф основной ролки: облик владельца в эпохе мира по умолчанию. Один раз
+ * (1.8.2 — ещё раз: образы, которым владельца нашёл разбор 1.8.1, облика не получили).
+ */
+let migrBusy = false;
 async function migrateSlices() {
     const s = settings();
     const api = globalThis.SacredTimeline;
-    if (s.migrSlice || typeof api?.sliceAt !== 'function' || typeof api?.chronograph !== 'function') return;
-    const map = await api.chronograph().catch(() => null);
-    const base = map?.eras?.find(e => e.id === map.defaultEra)?.from;
-    if (!base) return;
-    const memo = new Map();
-    const atBase = async (owner) => {
-        if (!memo.has(owner)) memo.set(owner, (await api.sliceAt(owner, base).catch(() => null))?.slice || null);
-        return memo.get(owner);
-    };
-    let n = 0;
-    for (const it of s.items) {
-        if (it.slice || !it.owner || (it.at && it.at >= EPOCHS)) continue;
-        const sl = await atBase(it.owner);
-        if (sl) { it.slice = sl; n++; }
-    }
-    for (const set of s.sets) {
-        if (set.slice || !set.owner) continue;
-        const sl = await atBase(set.owner);
-        if (sl) { set.slice = sl; n++; }
-    }
-    s.migrSlice = true;
-    saveSettings();
-    if (n) console.log(`[Гардероб] облики: старым вещам и комплектам — шкаф основной ролки (${n})`);
+    if (!s.migrSlice182) { s.migrSlice = false; s.migrSlice182 = true; }
+    if (migrBusy || s.migrSlice || typeof api?.sliceAt !== 'function' || typeof api?.chronograph !== 'function') return;
+    migrBusy = true;
+    try {
+        if (!(await baseDate())) return; // ядро ещё не готово — в следующий раз
+        // облики каждой личности из Реестра: чужой облик у вещи — след разбора владельцев 1.8.1 (владелец сменился, облик остался)
+        const reg = await api.registry?.().catch(() => null);
+        const own = new Map();
+        for (const e of Object.values(reg?.entries || {})) {
+            const g = e?.gc;
+            if (g?.type === 'identity' && g.id) own.set(g.id, new Set((g.slices || []).map(x => x.id)));
+        }
+        let n = 0;
+        for (const x of [...s.items, ...s.sets]) {
+            if (!x.owner) continue;
+            const b = await baseOf(x.owner);
+            const mine = b?.identity ? own.get(b.identity) : null;
+            if (x.slice && !(mine && !mine.has(x.slice))) continue;
+            const t = bornAt(x);
+            let sl = null;
+            if (!t || t < EPOCHS) sl = b?.slice || null;
+            else if (x.itemIds) {
+                // новый образ с чужим обликом: облик его вещей того же владельца, иначе — основная ролка
+                const its = x.itemIds.map(id => s.items.find(i => i.id === id)).filter(i => i?.owner === x.owner && i.slice && (!mine || mine.has(i.slice)));
+                sl = its[0]?.slice || b?.slice || null;
+            } else if (x.slice) sl = b?.slice || null;
+            else continue; // новая вещь без облика (ядра не было) — общая для всех обликов владельца, как и раньше
+            if (sl && sl !== x.slice) { x.slice = sl; n++; } else if (!sl && x.slice) { delete x.slice; n++; }
+        }
+        s.migrSlice = true;
+        saveSettings();
+        if (n) { console.log(`[Гардероб] облики: шкаф основной ролки и чужие облики поправлены (${n})`); if (ui.open) render(); }
+    } finally { migrBusy = false; }
+}
+
+/** Образу дали владельца (разбор 1.8.1 или руками) — облик: старому — основной ролки, новому — нынешний. */
+async function sliceForOwner(set, owner) {
+    delete set.era;
+    const t = bornAt(set);
+    const sl = !t || t < EPOCHS ? await baseSlice(owner) : sliceNow(owner);
+    if (sl) set.slice = sl; else delete set.slice;
 }
 
 function wearItem(who, it) {
@@ -1140,7 +1260,7 @@ const catIcon = (c) => CAT_ICON[catKey(c)] || '🏷';
 function lookOwners() {
     const out = [];
     const add = (n) => { if (n && !out.includes(n)) out.push(n); };
-    const sets = settings().sets.filter(inEra);
+    const sets = settings().sets.filter(x => inEra(x));
     const me = ctx().name1;
     for (const n of castNames()) if (n !== me || sets.some(x => x.owner === n)) add(n);
     for (const set of sets) add(set.owner);
@@ -1161,7 +1281,7 @@ function lookWornBy(set, who) {
 
 /** Образы на странице: выбранного персонажа (только его) или все. */
 function looksShown() {
-    const list = settings().sets.filter(inEra);
+    const list = settings().sets.filter(x => inEra(x));
     if (!ui.lkWho || ui.lkWho === '*') return list;
     return list.filter(x => x.owner === ui.lkWho);
 }
@@ -1195,10 +1315,12 @@ function ownerCandidates() {
  * Разобрать владельцев образов: «общий» с «Хеди, …» в названии или с вещами Хеди — Хеди; «Хеди — дома» у Баки
  * с не его вещами — Хеди. Совсем непонятные остаются общими. Возвращает, кого куда переложила.
  */
-function runOwnerFix() {
+async function runOwnerFix() {
     const s = settings();
     const { list, prefer } = ownerCandidates();
     const moved = fixLookOwners(s.sets, s.items, list, parseAliases(s.aliases), prefer);
+    // облик: старые — шкаф основной ролки, новые — нынешний облик; иначе 2024-й образ всплыл бы в сороковых
+    for (const m of moved) await sliceForOwner(m.set, m.to).catch(() => null);
     if (moved.length) saveSettings();
     return moved;
 }
@@ -1296,9 +1418,12 @@ function renderLooks() {
     // 1.8.1: старые комплекты без владельца (прежний конструктор ставил «общее») разложить по людям — один раз
     if (!s.ownFix181) {
         s.ownFix181 = true;
-        const moved = runOwnerFix();
         saveSettings();
-        if (moved.length) setTimeout(() => toast('success', esc(`Разобрала владельцев образов: ${ownerFixText(moved)}`), '👗 Образы', { timeOut: 9000 }), 450);
+        runOwnerFix().then(moved => {
+            if (!moved.length) return;
+            render();
+            setTimeout(() => toast('success', esc(`Разобрала владельцев образов: ${ownerFixText(moved)}`), '👗 Образы', { timeOut: 9000 }), 300);
+        }).catch(e => console.warn('[Гардероб] владельцы', e));
     }
     const owners = lookOwners();
     if (!ui.lkWho || (ui.lkWho !== '*' && !owners.includes(ui.lkWho))) {
@@ -1569,7 +1694,8 @@ function saveWornAsSet(who) {
         e.itemId = it.id;
         return it.id;
     });
-    const set = { id: uid(), name: `${shortName(who)} — образ ${s.sets.length + 1}`, owner: who, itemIds: ids, at: Date.now(), ...(sliceNow(who) ? { slice: sliceNow(who) } : {}) };
+    const set = { id: uid(), name: `${shortName(who)} — образ ${s.sets.length + 1}`, owner: who, itemIds: ids, at: Date.now() };
+    retag(set, who);
     s.sets.unshift(set);
     saveSettings();
     return set;
@@ -1840,7 +1966,7 @@ function readProposed(box) {
 
 function pickClosetModal() {
     const who = ui.who;
-    const items = settings().items.filter(inEra);
+    const items = settings().items.filter(x => inEra(x));
     const mine = items.filter(it => !it.owner || it.owner === who);
     const rest = items.filter(it => it.owner && it.owner !== who);
     openModal(`Из шкафа → ${esc(shortName(who))}`, items.length ? `
@@ -1856,7 +1982,7 @@ function setBuilderModal(set = null, { owner, cat } = {}) {
     const chosen = new Set(set?.itemIds || []);
     const who = set ? set.owner : (owner || defaultOwner());
     const c = set ? set.cat || '' : (cat ?? (ui.tab === 'looks' && !['all', 'new', 'none'].includes(ui.lkCat) ? ui.lkCat : ''));
-    const items = settings().items.filter(inEra);
+    const items = settings().items.filter(x => inEra(x));
     // сначала вещи этого персонажа и общие, потом чужие
     const mine = items.filter(it => !it.owner || !who || it.owner === who || chosen.has(it.id));
     const rest = items.filter(it => !mine.includes(it));
@@ -1908,7 +2034,7 @@ async function onClick(ev) {
         case 'who-menu': {
             const w = chatState();
             openModal(esc(ui.who), menuList([
-                ['face', 'fa-face-smile', s.faces[ui.who] ? 'Лицо для картинок (заменить)' : 'Лицо для картинок'],
+                ['face', 'fa-face-smile', `${s.faces[faceKey(ui.who)] ? 'Лицо для картинок (заменить)' : 'Лицо для картинок'}${faceKey(ui.who) !== ui.who ? ' · этого облика' : ''}`],
                 ['strip', 'fa-person', 'Раздеть (📌, причёска и макияж останутся)'],
                 ['wear-off-all', 'fa-arrow-up', 'Надеть обратно всё снятое'],
                 ['save-as-set', 'fa-layer-group', 'Сохранить надетое как комплект'],
@@ -1919,9 +2045,10 @@ async function onClick(ev) {
             break;
         }
         case 'face': {
-            const cur = s.faces[ui.who];
-            openModal(`Лицо: ${esc(shortName(ui.who))}`, `
-                <div class="wd-hint-soft">Это фото гардероб прикладывает, когда рисует вещи «на человеке» (лукбук, причёски, макияж). Лучше всего — лицо крупно, ровный свет, без других людей.</div>
+            const cur = s.faces[faceKey(ui.who)];
+            const lbl = faceKey(ui.who) !== ui.who ? sliceLabel(ui.who) : '';
+            openModal(`Лицо: ${esc(shortName(ui.who))}${lbl ? ` · ${esc(lbl)}` : ''}`, `
+                <div class="wd-hint-soft">Это фото гардероб прикладывает, когда рисует вещи «на человеке» (лукбук, причёски, макияж). Лучше всего — лицо крупно, ровный свет, без других людей.${lbl ? ` Это лицо — только для облика «${esc(lbl)}»: в основной ролке и других эпохах — своё.` : ''}</div>
                 <div class="wd-big" data-face="${esc(ui.who)}">${cur ? `<img src="${esc(cur)}" alt="">` : '<span>🙂</span>'}</div>
                 <div class="wd-actions-row">
                     <label class="wd-btn primary"><i class="fa-solid fa-camera"></i> ${cur ? 'Заменить фото' : 'Загрузить фото'}<input type="file" accept="image/*" data-input="facefile" hidden></label>
@@ -1929,7 +2056,7 @@ async function onClick(ev) {
                 </div>`);
             break;
         }
-        case 'face-del': { delete s.faces[ui.who]; saveSettings(); closeModal(); render(); break; }
+        case 'face-del': { delete s.faces[faceKey(ui.who)]; saveSettings(); closeModal(); render(); break; }
         case 'strip': { stripClothes(charState(ui.who)); closeModal(); commit(); break; }
         case 'wear-off-all': { const st = charState(ui.who); st.worn.push(...st.off); st.off = []; closeModal(); commit(); break; }
         case 'wipe-who': { const st = charState(ui.who); st.worn = []; st.off = []; closeModal(); commit(); break; }
@@ -2042,7 +2169,7 @@ async function onClick(ev) {
             const it = closetItem(id);
             const f = readForm(box);
             if (it && f.name) {
-                if (f.owner !== it.owner) { const sl = sliceNow(f.owner); if (sl) it.slice = sl; else delete it.slice; }
+                if (f.owner !== it.owner) retag(it, f.owner);
                 Object.assign(it, { name: f.name, slot: normSlot(f.slot), owner: f.owner, desc: f.desc });
             }
             if (it && !!it.pinned !== f.pinned) { setPinned(it.id, f.pinned); saveChat(); updateInjection(); }
@@ -2165,12 +2292,15 @@ async function onClick(ev) {
             const owner = box.querySelector('[data-input="setowner"]').value;
             const cat = readCat(box, 'data-input="setcat"');
             const old = id ? s.sets.find(x => x.id === id) : null;
-            const sl = sliceNow(owner);
             if (old) {
-                if (owner !== old.owner) { if (sl) old.slice = sl; else delete old.slice; }
+                if (owner !== old.owner) retag(old, owner);
                 Object.assign(old, { name: nm, owner, itemIds: ids, cat });
                 if (nm) old.named = true;
-            } else s.sets.unshift({ id: uid(), name: nm, owner, itemIds: ids, cat, at: Date.now(), named: true, ...(sl ? { slice: sl } : {}) });
+            } else {
+                const set = { id: uid(), name: nm, owner, itemIds: ids, cat, at: Date.now(), named: true };
+                retag(set, owner);
+                s.sets.unshift(set);
+            }
             saveSettings();
             if (old && ui.tab === 'looks') { lookModal(old.id); render(); break; }
             closeModal(); render(); break;
@@ -2203,8 +2333,7 @@ async function onClick(ev) {
             if (!set) break;
             const to = name || '';
             if (to !== set.owner) {
-                const sl = sliceNow(to);
-                if (sl) set.slice = sl; else delete set.slice;
+                retag(set, to);
                 set.owner = to;
                 saveSettings();
             }
@@ -2213,7 +2342,7 @@ async function onClick(ev) {
             break;
         }
         case 'look-ownfix': {
-            const moved = runOwnerFix();
+            const moved = await runOwnerFix();
             render();
             toast(moved.length ? 'success' : 'info', esc(moved.length ? `Разобрала: ${ownerFixText(moved)}` : 'По названиям и вещам не понять, чьи остальные, — отдай их тапом по «общий».'), '👗 Образы', { timeOut: 6000 });
             break;
@@ -2268,7 +2397,7 @@ async function onClick(ev) {
             if (!set || !box) break;
             const f = readForm(box);
             const owner = f.owner;
-            if (owner !== set.owner) { const sl = sliceNow(owner); if (sl) set.slice = sl; else delete set.slice; }
+            if (owner !== set.owner) retag(set, owner);
             Object.assign(set, {
                 name: f.name || set.name,
                 owner,
@@ -2294,7 +2423,6 @@ async function onClick(ev) {
             const drawItems = !!box.querySelector('[data-input="lkitems"]')?.checked;
             const hair = !!box.querySelector('[data-input="lkhair"]')?.checked;
             Object.assign(s, { lkDrawCover: drawCover, lkDrawItems: drawItems, lkHair: hair });
-            const sl = sliceNow(owner);
             const set = {
                 id: uid(),
                 name: nm || (text && !d.img ? cut(text.replace(/\s+/g, ' '), 40) : 'Новый образ'),
@@ -2305,8 +2433,8 @@ async function onClick(ev) {
                 pending: true,
                 src: { ...(d.img ? { img: d.img } : {}), ...(text ? { text } : {}), ...(hair ? { look: true } : {}) },
                 ...(nm ? { named: true } : {}),
-                ...(sl ? { slice: sl } : {}),
             };
+            retag(set, owner);
             if (d.img) pushImg(set, d.img);
             s.sets.unshift(set);
             saveSettings();
@@ -2417,7 +2545,7 @@ async function onInput(ev) {
         if (big) big.classList.add('wd-drawing');
         try {
             const path = await uploadImage(await fileToDataUrl(file, 1024));
-            s.faces[who] = path;
+            s.faces[faceKey(who)] = path;
             faceWarned.delete(who);
             saveSettings();
             if (big) big.innerHTML = `<img src="${esc(path)}" alt="">`;
@@ -2789,7 +2917,7 @@ window.Wardrobe = Object.freeze({
     /** Коллекция образов на весь экран: чья и какой раздел («Офис», «Вечернее»…). */
     openLooks(who, cat) { if (who) { ui.who = who; ui.lkWho = who; } if (cat) ui.lkCat = cat; openPanel('looks'); },
     /** Комплекты (образы), которые видно в этом чате (облик эпохи + общие) — для Life. Неразобранные — не отдаём. */
-    setsFor(who) { return settings().sets.filter(x => !x.pending && inEra(x) && (!who || !x.owner || x.owner === who)); },
+    setsFor(who) { return settings().sets.filter(x => !x.pending && inEra(x, true) && (!who || !x.owner || x.owner === who)); },
     /** Разделы образов (Офис, Вечернее, Спортивное…). */
     cats() { return [...settings().cats]; },
     /** Облик владельца в этом чате (ядро «Священный таймлайн»): { identity, slice, label } | null. */
@@ -2820,6 +2948,7 @@ jQuery(async () => {
         const t = setInterval(() => { if (addWandButton() || ++tries > 20) clearInterval(t); }, 500);
     }
     const { eventSource, eventTypes } = ctx();
+    migrateSlices().catch(e => console.warn('[Гардероб] облики', e));
     eventSource.on(eventTypes.CHAT_CHANGED, () => {
         ui.who = '';
         ui.allEras = false;
@@ -2837,7 +2966,10 @@ jQuery(async () => {
     });
     eventSource.on(eventTypes.MESSAGE_SWIPED, (mesId) => onSwiped(Number(mesId)));
     // ядро узнало эпоху и облики этого чата — шкаф показывает своё
-    eventSource.on('sacred-timeline:changed', () => { if (ui.open) render(); });
+    eventSource.on('sacred-timeline:changed', () => {
+        migrateSlices().catch(e => console.warn('[Гардероб] облики', e)); // ядро могло проснуться позже чата
+        if (ui.open) render();
+    });
     eventSource.on(eventTypes.MESSAGE_DELETED, (len) => onDeleted(len));
     if (eventTypes.GROUP_UPDATED) eventSource.on(eventTypes.GROUP_UPDATED, () => { updateInjection(); render(); });
     if (eventTypes.APP_READY) eventSource.on(eventTypes.APP_READY, () => { addWandButton(); updateInjection(); });

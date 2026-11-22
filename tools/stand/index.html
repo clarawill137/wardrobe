@@ -55,6 +55,8 @@
         { id: 's7', name: 'Хеди, осень', owner: '', itemIds: ['i13', 'i14'], cat: 'Повседневное', img: img('clover43.jpg') },
         { id: 's8', name: 'Летний вечер', owner: '', itemIds: ['i8', 'i14'], cat: 'Повседневное' },
         { id: 's9', name: 'Хеди — шуба', owner: 'Bucky Barnes', itemIds: ['i13'] },
+        // след 1.8.1: владельца переложили, облик остался чужой — 1.8.2 чинит
+        { id: 's10', name: 'Кофе с утра', owner: 'Хеди', itemIds: ['i5', 'i6'], cat: 'Повседневное', slice: 'bucky.2024' },
     ];
     const extensionSettings = {
         wardrobe: {
@@ -109,6 +111,32 @@
         },
     };
     window.SillyTavern = { getContext: () => c };
+    // ── ядро «Священный таймлайн» (мок): эпоха чата переключается window.__era, облики по эпохам ──
+    window.__era = '2024';
+    const SLICES = { '2024': { 'Хеди': 'hedy.2024', 'Bucky Barnes': 'bucky.2024', 'Natasha Romanoff': 'nat.2024' }, '1943': { 'Хеди': 'hedy.1943', 'Bucky Barnes': 'bucky.1943' } };
+    const ID = { 'Хеди': 'hedy', 'Bucky Barnes': 'bucky', 'Natasha Romanoff': 'nat' };
+    window.SacredTimeline = {
+        version: 'stand',
+        context: () => ({
+            v: 1, world: { id: 'w1', defaultEra: '2024' }, era: { id: window.__era, label: window.__era }, explicit: true, chatId: 'chat1',
+            date: window.__era === '1943' ? '1943-12' : '2024-11-20',
+            people: Object.fromEntries(Object.entries(SLICES[window.__era] || {}).map(([n, sl]) => [n, { identity: ID[n], slice: sl, label: sl }])), ext: {},
+        }),
+        mode: () => 'on',
+        chronograph: async () => ({ defaultEra: '2024', eras: [{ id: '1943', from: '1943-12' }, { id: '2024', from: '2024-11-19' }] }),
+        registry: async () => ({ entries: {
+            1: { gc: { type: 'identity', id: 'hedy', slices: [{ id: 'hedy.2024' }, { id: 'hedy.1943' }] } },
+            2: { gc: { type: 'identity', id: 'bucky', slices: [{ id: 'bucky.2024' }, { id: 'bucky.1943' }] } },
+            3: { gc: { type: 'identity', id: 'nat', slices: [{ id: 'nat.2024' }] } },
+        } }),
+        sliceAt: async (name, date) => ({ identity: ID[name] || null, slice: (String(date) >= '2000' ? SLICES['2024'] : SLICES['1943'])[name] || null, label: null }),
+    };
+    // лорбук рефов SLAY: облик сам по ядру — в сороковых у Хеди своё фото (64×64), в 2024 его нет
+    window.slayRefBook = {
+        match: (t) => (/Хеди/.test(String(t)) && window.__era === '1943' ? [{ id: 'rb-1943', identity: 'hedy', slice: 'hedy.1943' }] : []),
+        image: async () => { const r = await fetch('/samples/rb64.png'); const b = new Uint8Array(await r.arrayBuffer()); let s = ''; for (const x of b) s += String.fromCharCode(x); return btoa(s); },
+        label: () => 'облик 1943', names: () => true,
+    };
     window.__emit = (t, ...a) => (listeners[t] || []).forEach(f => f(...a));
     // мини-jQuery: только то, что зовёт гардероб
     const $ = (a) => {
