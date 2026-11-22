@@ -348,6 +348,9 @@
     opacity: 0.6;
 }
 .wd-sec .wd-link { text-transform: none; letter-spacing: 0; font-size: 1.1em; }
+/* состав образа: подзаголовки разделов вещей */
+.wd-sb-sec { margin: 12px 2px 6px; font-size: 13px; font-weight: 600; opacity: .85; }
+.wd-sb-sec small { opacity: .6; font-weight: 400; margin-left: 4px; }
 
 .wd-hint, .wd-hint-soft {
     font-size: 0.84em;

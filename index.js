@@ -9,13 +9,13 @@ import {
     CLOTHES_RE, entryFromItem, newEntry, wearOutfit, stripClothes, sortBySlot, buildInjection,
     WATCHER_SYSTEM, buildWatcherInput, applyChanges, ANALYZE_SYSTEM, parseAnalyzed, parseAliases, detachItem, dedupeChars,
     matchScore, ownerWordsOf, DEFAULT_CATS, CORE_CATS, catList, matchCat, lookSystem, parseLook, catSystem, wornAll,
-    galleryOf, pushImg, stepImg, dropImg, fixLookOwners,
+    galleryOf, pushImg, stepImg, dropImg, fixLookOwners, baseName,
 } from './core.js';
 import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, ATLAS_EDIT, resolveConnection, generateImage, itemPrompt, setPrompt, styleHasPerson, styleShort, styleAspect } from './draw.js';
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.8.2';
+const VERSION = '1.8.3';
 
 const DEFAULTS = {
     enabled: true,
@@ -37,7 +37,8 @@ const DEFAULTS = {
     imgModel: '',
     imgNaisteraModel: '',
     imgAtlasModel: '',
-    imgStyle: 'oil',
+    imgStyle: 'oil',         // образы (полные луки)
+    itemStyle: 'clover',     // вещи шкафа — её «по вещам старый стиль» (1.8.3)
     imgOnPerson: 'owner',
     faces: {},
     imgStyleCustom: '',
@@ -95,6 +96,12 @@ function settings() {
     if (!s.migr121) { if (!s.imgSource || s.imgSource === 'silly') s.imgSource = 'auto'; s.migr121 = true; }
     // 1.8: стиль картинок — масло, полуреализм (прежний запомнен: вернуть — в ⚙ или 🎨 на странице образов)
     if (!s.migr180) { if (s.imgStyle !== 'oil') s.imgStylePrev = s.imgStyle; s.imgStyle = 'oil'; s.migr180 = true; }
+    // 1.8.3: вещи в шкафу — прежним стилем (что стоял до масла), образы — маслом
+    if (!s.migr183) {
+        const prev = s.imgStylePrev;
+        s.itemStyle = prev && prev !== 'oil' && (STYLES[prev] || prev === 'custom') ? prev : 'clover';
+        s.migr183 = true;
+    }
     if (!Array.isArray(s.cats) || !s.cats.length) s.cats = [...DEFAULT_CATS];
     return s;
 }
@@ -736,9 +743,12 @@ function waitToast(sec, status) {
     toast('info', status === 429 ? `Сервис просит не так часто — жду ${sec} с и пробую снова` : `Сервис картинок сбоит — повтор через ${sec} с`, '👗 Гардероб', { timeOut: Math.min(sec, 8) * 1000 });
 }
 
+/** Настройки для картинок вещей: стиль — вещей шкафа (itemStyle), не образов. */
+const itemView = (s) => ({ ...s, imgStyle: s.itemStyle || 'clover' });
+
 /** Нарисовать картинку вещи шкафа. ref — фото-образец (data:URL), по нему рисуется именно эта вещь. */
 async function drawItem(id, { ref = '' } = {}) {
-    const s = settings();
+    const s = itemView(settings());
     const it = closetItem(id);
     if (!it) return;
     const conn = imgConnection();
@@ -1620,7 +1630,7 @@ function lookAddModal({ owner, cat } = {}) {
         </div>
         <div class="wd-field"><label>Название <small>(пусто — придумает ИИ)</small></label><input type="text" data-input="lkname" placeholder="например: Кремовый блейзер и шёлк"></div>
         <label class="wd-switch"><input type="checkbox" data-input="lkcover" ${s.lkDrawCover && canDraw() ? 'checked' : ''}><span></span>Нарисовать образ на персонаже — стиль «${esc(styleShort(s))}», лицо из рефов</label>
-        <label class="wd-switch"><input type="checkbox" data-input="lkitems" ${s.lkDrawItems && canDraw() ? 'checked' : ''}><span></span>Нарисовать новые вещи для шкафа</label>
+        <label class="wd-switch"><input type="checkbox" data-input="lkitems" ${s.lkDrawItems && canDraw() ? 'checked' : ''}><span></span>Нарисовать новые вещи для шкафа — стиль «${esc(styleShort(itemView(s)))}»</label>
         <label class="wd-switch"><input type="checkbox" data-input="lkhair" ${s.lkHair ? 'checked' : ''}><span></span>Взять и причёску с макияжем (обычно не надо — у персонажа свои)</label>
         <button class="wd-btn primary full" data-act="look-import"><i class="fa-solid fa-wand-magic-sparkles"></i> Добавить — ИИ разберёт сам</button>
         <div class="wd-or"><span>или собрать самой</span></div>
@@ -1674,10 +1684,14 @@ function styleModal() {
     const s = settings();
     const opts = [...Object.entries(STYLES).map(([k, v]) => [k, v.t, v.d || '']), ['custom', 'Свой промт стиля', 'пишется в ⚙ → Картинки вещей']];
     const shown = looksIn(looksShown(), ui.lkCat).filter(x => !x.pending && ((x.itemIds || []).length || x.prompt));
+    const row = (cur, which) => `<div class="wd-menu">${opts.map(([k, t, d]) => `<button class="wd-menu-item wd-style-opt ${k === cur ? 'on' : ''}" data-act="style-pick" data-for="${which}" data-v="${esc(k)}">
+            ${k === cur ? '<i class="fa-solid fa-circle-check"></i>' : '<span class="wd-radio"></span>'}
+            <span class="wd-style-txt"><b>${esc(t)}</b>${d ? `<small>${esc(d)}</small>` : ''}</span></button>`).join('')}</div>`;
     openModal('Стиль картинок', `
-        <div class="wd-menu">${opts.map(([k, t, d]) => `<button class="wd-menu-item wd-style-opt ${k === s.imgStyle ? 'on' : ''}" data-act="style-pick" data-v="${esc(k)}">
-            ${k === s.imgStyle ? '<i class="fa-solid fa-circle-check"></i>' : '<span class="wd-radio"></span>'}
-            <span class="wd-style-txt"><b>${esc(t)}</b>${d ? `<small>${esc(d)}</small>` : ''}</span></button>`).join('')}</div>
+        <div class="wd-sec">Образы</div>
+        ${row(s.imgStyle, 'looks')}
+        <div class="wd-sec">Вещи в шкафу</div>
+        ${row(s.itemStyle, 'items')}
         <div class="wd-hint-soft">Старые картинки не пропадают: новая встаёт сверху, прежние листаются свайпом по карточке.</div>
         ${shown.length ? `<button class="wd-btn full" data-act="draw-looks-shown"><i class="fa-solid fa-rotate"></i> Перерисовать показанные образы в этом стиле (${shown.length})</button>` : ''}`);
 }
@@ -1782,11 +1796,12 @@ function imgSettings(s) {
         ${own}
         ${conn.apiType === 'atlas' ? `<div class="wd-field"><label>Модель Atlas для вещей <small>(нужна edit-модель: она держит лицо по рефу)</small></label><select data-set="imgAtlasModel"><option value="">${esc(slay?.apiType === 'atlas' && ATLAS_EDIT[slay.atlasModel] ? `как в SLAY (${ATLAS_EDIT[slay.atlasModel].t})` : `по умолчанию (${ATLAS_EDIT[DEFAULT_MODELS.atlas].t})`)}</option>${Object.entries(ATLAS_EDIT).map(([m, v]) => `<option value="${esc(m)}" ${m === s.imgAtlasModel ? 'selected' : ''}>${esc(v.t)}</option>`).join('')}</select></div>` : ''}
         ${conn.apiType === 'naistera' ? `<div class="wd-field"><label>Модель Naistera для вещей</label><select data-set="imgNaisteraModel"><option value="">как в профиле (NovelAI → Nano Banana)</option>${NAISTERA_MODELS.map(m => `<option value="${m}" ${m === s.imgNaisteraModel ? 'selected' : ''}>${m}</option>`).join('')}</select></div>` : ''}
-        <div class="wd-field"><label>Стиль</label><select data-set="imgStyle">${Object.entries(STYLES).map(([k, v]) => `<option value="${k}" ${k === s.imgStyle ? 'selected' : ''}>${esc(v.t)}</option>`).join('')}<option value="custom" ${s.imgStyle === 'custom' ? 'selected' : ''}>Свой промпт стиля</option></select></div>
+        <div class="wd-field"><label>Стиль образов</label><select data-set="imgStyle">${Object.entries(STYLES).map(([k, v]) => `<option value="${k}" ${k === s.imgStyle ? 'selected' : ''}>${esc(v.t)}</option>`).join('')}<option value="custom" ${s.imgStyle === 'custom' ? 'selected' : ''}>Свой промпт стиля</option></select></div>
+        <div class="wd-field"><label>Стиль вещей в шкафу</label><select data-set="itemStyle">${Object.entries(STYLES).map(([k, v]) => `<option value="${k}" ${k === s.itemStyle ? 'selected' : ''}>${esc(v.t)}</option>`).join('')}<option value="custom" ${s.itemStyle === 'custom' ? 'selected' : ''}>Свой промпт стиля</option></select></div>
         <div class="wd-field"><label>На ком рисовать <small>(лукбук, причёски, макияж)</small></label><select data-set="imgOnPerson">
             <option value="owner" ${s.imgOnPerson !== 'model' ? 'selected' : ''}>на владельце вещи — его лицо из рефов sillyimages/SLAY или аватарки</option>
             <option value="model" ${s.imgOnPerson === 'model' ? 'selected' : ''}>на нейтральной модели</option></select></div>
-        ${s.imgStyle === 'custom' ? `<div class="wd-field"><label>Промпт стиля (по-английски лучше)</label><textarea rows="3" data-set="imgStyleCustom">${esc(s.imgStyleCustom)}</textarea></div>` : ''}
+        ${s.imgStyle === 'custom' || s.itemStyle === 'custom' ? `<div class="wd-field"><label>Промпт стиля (по-английски лучше)</label><textarea rows="3" data-set="imgStyleCustom">${esc(s.imgStyleCustom)}</textarea></div>` : ''}
         <label class="wd-switch"><input type="checkbox" data-set="autoDraw" ${s.autoDraw ? 'checked' : ''}><span></span>Сразу рисовать новые вещи</label>
         <div class="wd-hint-soft">${conn.error ? `⚠️ ${esc(conn.error)}` : `Рисую через ${esc(conn.apiType)} · ${esc(conn.model)}`}</div>
         <div class="wd-sec">Прочее</div>`;
@@ -1834,6 +1849,7 @@ function closeModal() {
     const host = document.querySelector('#wd-panel .wd-modal-host');
     if (host) { host.classList.remove('on'); host.innerHTML = ''; }
     ui.draft = null;
+    ui.sb = null;
 }
 
 function menuList(items) {
@@ -1871,7 +1887,7 @@ function itemMenu(id) {
     openModal(esc(it.name), `
         ${bigImgHtml(it, slotOf(it.slot).i)}
         <div class="wd-actions-row">
-            <button class="wd-btn primary" data-act="item-draw" data-id="${esc(it.id)}"><i class="fa-solid fa-palette"></i> ${it.img ? 'Перерисовать' : 'Нарисовать'} · ${esc(styleShort(settings()))}</button>
+            <button class="wd-btn primary" data-act="item-draw" data-id="${esc(it.id)}"><i class="fa-solid fa-palette"></i> ${it.img ? 'Перерисовать' : 'Нарисовать'} · ${esc(styleShort(itemView(settings())))}</button>
             <label class="wd-btn"><i class="fa-solid fa-camera"></i> Своё фото<input type="file" accept="image/*" data-input="itemfile" data-id="${esc(it.id)}" hidden></label>
         </div>
         ${looks.length ? `<div class="wd-sec">В образах</div><div class="wd-chips">${looks.map(x => `<button class="wd-chip" data-act="look-open" data-id="${esc(x.id)}">${x.cat ? catIcon(x.cat) : '🎽'} ${esc(cut(x.name, 30))}</button>`).join('')}</div>` : ''}
@@ -1977,15 +1993,45 @@ function pickClosetModal() {
            <button class="wd-btn primary full" data-act="new-item"><i class="fa-solid fa-plus"></i> Добавить вещь</button>`);
 }
 
+/**
+ * Вещи для состава образа. У образа с владельцем — только его вещи (её «для одежды Хеди — только её»; эпохи одного
+ * человека — по baseName), у общего — все; уже выбранные — всегда, чтобы их можно было снять.
+ */
+function sbItems() {
+    const { who, chosen } = ui.sb;
+    const items = settings().items.filter(x => inEra(x));
+    if (!who) return items;
+    const b = baseName(who);
+    return items.filter(it => chosen.has(it.id) || (it.owner && (it.owner === who || baseName(it.owner) === b)));
+}
+
+/** Сетка состава: чипы людей (только у общего образа), чипы разделов, вещи по разделам. */
+function sbGrid() {
+    const sb = ui.sb;
+    let items = sbItems();
+    const people = sb.who ? [] : [...new Set(items.map(it => it.owner || ''))].sort((a, b) => (!a) - (!b) || a.localeCompare(b));
+    if (!sb.who && sb.person !== 'all') items = items.filter(it => (it.owner || '') === sb.person);
+    const slots = SLOTS.filter(sl => items.some(it => normSlot(it.slot) === sl.k));
+    if (sb.slot !== 'all' && !slots.some(sl => sl.k === sb.slot)) sb.slot = 'all';
+    const card = (it) => `<button class="wd-card ${sb.chosen.has(it.id) ? 'on' : ''}" data-act="set-toggle" data-id="${esc(it.id)}">${thumb(it, 'wd-card-img')}<div class="wd-card-name">${esc(it.name)}</div>${!sb.who && sb.person === 'all' ? `<div class="wd-card-meta">${it.owner ? esc(shortName(it.owner)) : 'общее'}</div>` : sb.who && it.owner && baseName(it.owner) !== baseName(sb.who) ? `<div class="wd-card-meta">${esc(shortName(it.owner))} · уже в образе</div>` : ''}</button>`;
+    const pchips = people.length > 1 ? `<div class="wd-chips"><button class="wd-chip ${sb.person === 'all' ? 'on' : ''}" data-act="sb-person" data-owner="all">все</button>${people.map(p => `<button class="wd-chip ${sb.person === p ? 'on' : ''}" data-act="sb-person" data-owner="${esc(p)}">${p ? esc(shortName(p)) : 'общее'}</button>`).join('')}</div>` : '';
+    const schips = slots.length > 1 ? `<div class="wd-chips">${[{ k: 'all', t: 'Всё', i: '🗂' }, ...slots].map(sl => `<button class="wd-chip ${sb.slot === sl.k ? 'on' : ''}" data-act="sb-slot" data-slot="${sl.k}">${sl.i} ${esc(sl.t)}</button>`).join('')}</div>` : '';
+    let body;
+    if (!items.length) body = `<div class="wd-hint-soft">${sb.who ? `У ${esc(shortName(sb.who))} в шкафу${eraOn() ? ' этой эпохи' : ''} пока нет вещей.` : 'Шкаф пустой.'}</div>`;
+    else if (sb.slot !== 'all') body = `<div class="wd-grid small">${items.filter(it => normSlot(it.slot) === sb.slot).map(card).join('')}</div>`;
+    else body = slots.map(sl => {
+        const its = items.filter(it => normSlot(it.slot) === sl.k);
+        return `<div class="wd-sb-sec">${sl.i} ${esc(sl.t)} <small>${its.length}</small></div><div class="wd-grid small">${its.map(card).join('')}</div>`;
+    }).join('');
+    return `${pchips}${schips}${body}`;
+}
+const sbPaint = () => { const g = document.querySelector('#wd-panel [data-sb-grid]'); if (g) g.innerHTML = sbGrid(); };
+
 /** Собрать образ из вещей шкафа (или поменять состав). */
 function setBuilderModal(set = null, { owner, cat } = {}) {
-    const chosen = new Set(set?.itemIds || []);
     const who = set ? set.owner : (owner || defaultOwner());
+    ui.sb = { who: who || '', slot: 'all', person: 'all', chosen: new Set(set?.itemIds || []) };
     const c = set ? set.cat || '' : (cat ?? (ui.tab === 'looks' && !['all', 'new', 'none'].includes(ui.lkCat) ? ui.lkCat : ''));
-    const items = settings().items.filter(x => inEra(x));
-    // сначала вещи этого персонажа и общие, потом чужие
-    const mine = items.filter(it => !it.owner || !who || it.owner === who || chosen.has(it.id));
-    const rest = items.filter(it => !mine.includes(it));
     openModal(set ? 'Состав образа' : 'Новый образ из шкафа', `
         <div class="wd-field"><label>Название</label><input type="text" data-input="setname" value="${esc(set?.name || '')}" placeholder="например: Хеди — дома, уютное"></div>
         <div class="wd-grid2">
@@ -1993,7 +2039,7 @@ function setBuilderModal(set = null, { owner, cat } = {}) {
             <div class="wd-field"><label>Раздел</label>${catSelect(c, 'data-input="setcat"')}</div>
         </div>
         <div class="wd-sec">Вещи <small>(тапай, чтобы выбрать)</small></div>
-        <div class="wd-grid small">${[...mine, ...rest].map(it => `<button class="wd-card ${chosen.has(it.id) ? 'on' : ''}" data-act="set-toggle" data-id="${esc(it.id)}">${thumb(it, 'wd-card-img')}<div class="wd-card-name">${esc(it.name)}</div></button>`).join('')}</div>
+        <div data-sb-grid>${sbGrid()}</div>
         <button class="wd-btn primary full" data-act="set-save" ${set ? `data-id="${esc(set.id)}"` : ''}><i class="fa-solid fa-check"></i> Сохранить образ</button>`);
 }
 
@@ -2285,9 +2331,17 @@ async function onClick(ev) {
         }
 
         case 'set-new': setBuilderModal(); break;
-        case 'set-toggle': el.classList.toggle('on'); break;
+        case 'set-toggle': {
+            el.classList.toggle('on');
+            if (ui.sb) { if (el.classList.contains('on')) ui.sb.chosen.add(id); else ui.sb.chosen.delete(id); }
+            break;
+        }
+        case 'sb-slot': if (ui.sb) { ui.sb.slot = el.dataset.slot || 'all'; sbPaint(); } break;
+        case 'sb-person': if (ui.sb) { ui.sb.person = el.dataset.owner ?? 'all'; ui.sb.slot = 'all'; sbPaint(); } break;
         case 'set-save': {
-            const ids = [...box.querySelectorAll('.wd-card.on')].map(x => x.dataset.id);
+            // выбранное помним в ui.sb: вещи скрытых разделов в разметке не лежат
+            const ids = ui.sb ? s.items.filter(it => ui.sb.chosen.has(it.id)).map(it => it.id)
+                : [...box.querySelectorAll('.wd-card.on')].map(x => x.dataset.id);
             const nm = box.querySelector('[data-input="setname"]').value.trim() || `Образ ${s.sets.length + 1}`;
             const owner = box.querySelector('[data-input="setowner"]').value;
             const cat = readCat(box, 'data-input="setcat"');
@@ -2449,11 +2503,13 @@ async function onClick(ev) {
         }
         case 'look-style': styleModal(); break;
         case 'style-pick': {
-            s.imgStyle = el.dataset.v || 'oil';
+            const items = el.dataset.for === 'items';
+            if (items) s.itemStyle = el.dataset.v || 'clover';
+            else s.imgStyle = el.dataset.v || 'oil';
             saveSettings();
             closeModal();
             render();
-            toast('info', `Стиль картинок: ${esc(styleShort(s))}. Новые картинки — в нём, старые листаются свайпом.`, '👗 Гардероб', { timeOut: 3000 });
+            toast('info', `${items ? 'Вещи в шкафу' : 'Образы'}: стиль «${esc(styleShort(items ? itemView(s) : s))}». Новые картинки — в нём, старые листаются свайпом.`, '👗 Гардероб', { timeOut: 3000 });
             break;
         }
         case 'draw-looks-shown': {
@@ -2517,8 +2573,15 @@ async function onInput(ev) {
         s[k] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Math.max(0, parseInt(el.value) || 0) : el.value;
         saveSettings();
         if (k === 'showFab') syncFab();
-        if (['enabled', 'detail', 'depth', 'imgSource', 'imgStyle', 'imgProvider', 'imgNaisteraModel', 'imgAtlasModel'].includes(k) && ev.type === 'change') render();
+        if (['enabled', 'detail', 'depth', 'imgSource', 'imgStyle', 'itemStyle', 'imgProvider', 'imgNaisteraModel', 'imgAtlasModel'].includes(k) && ev.type === 'change') render();
         else updateInjection();
+        return;
+    }
+    if (el.dataset.input === 'setowner' && ui.sb && ev.type === 'change') {
+        ui.sb.who = el.value || '';
+        ui.sb.person = 'all';
+        ui.sb.slot = 'all';
+        sbPaint();
         return;
     }
     if (el.dataset.input === 'q') {
