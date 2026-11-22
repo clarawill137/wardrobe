@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Гардероб — стенд</title>
+<link rel="stylesheet" href="/fa/css/all.min.css">
+<link rel="stylesheet" href="/scripts/extensions/third-party/wardrobe/style.css">
+<style>
+    :root {
+        --SmartThemeBodyColor: #ece6ea;
+        --SmartThemeBlurTintColor: rgba(24, 20, 24, 0.94);
+        --SmartThemeChatTintColor: #1d1a1d;
+        --SmartThemeQuoteColor: #e98aa5;
+        --SmartThemeEmColor: #b9b2bd;
+    }
+    body { margin: 0; background: #141114; color: var(--SmartThemeBodyColor); font-family: 'Noto Sans', 'DejaVu Sans', system-ui, sans-serif; }
+    #chat { padding: 18px; opacity: .6; }
+    #toast-container { position: fixed; top: 8px; right: 8px; z-index: 999999; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="chat"><div class="mes" is_user="true"><div class="avatar"><img src="/thumbnail?type=avatar&file=Хеди.png" width="40"></div><p>…чат God Complex…</p></div></div>
+<div id="extensionsMenu"></div>
+<div id="extensions_settings2"></div>
+<script>
+(() => {
+    const img = (n) => `/samples/${n}`;
+    const T = Date.now();
+    // ── шкаф и образы «как у неё»: старые без раздела, часть с картинками-карандашом 4:3, часть — маслом ──
+    const items = [
+        { id: 'i1', name: 'чёрное платье на халтере', slot: 'dress', desc: 'длинное облегающее трикотажное платье в пол', owner: 'Хеди', img: img('oil1.png') },
+        { id: 'i2', name: 'чёрные лаковые лодочки', slot: 'shoes', desc: 'острый мыс, шпилька', owner: 'Хеди', img: img('item_sq.jpg') },
+        { id: 'i3', name: 'тонкий золотой браслет', slot: 'acc', desc: 'цепочка', owner: 'Хеди' },
+        { id: 'i4', name: 'белый лабораторный халат', slot: 'outer', desc: 'с бейджем А.И.М.', owner: 'Хеди', img: img('item_sq2.jpg') },
+        { id: 'i5', name: 'серая водолазка', slot: 'top', desc: 'тонкая шерсть', owner: 'Хеди', img: img('item_sq.jpg') },
+        { id: 'i6', name: 'чёрные брюки со стрелками', slot: 'bottom', desc: '', owner: 'Хеди' },
+        { id: 'i7', name: 'серые спортивные штаны', slot: 'bottom', desc: 'свободные, на манжетах', owner: 'Хеди' },
+        { id: 'i8', name: 'белые кроссовки', slot: 'shoes', desc: '', owner: 'Хеди' },
+        { id: 'i9', name: 'тактическая куртка', slot: 'outer', desc: 'чёрная, кевлар', owner: 'Bucky Barnes', img: img('item_sq2.jpg') },
+        { id: 'i10', name: 'чёрные карго', slot: 'bottom', desc: '', owner: 'Bucky Barnes' },
+        { id: 'i11', name: 'клетчатая пижама', slot: 'top', desc: 'фланель', owner: '' },
+        { id: 'i12', name: 'обручальное кольцо', slot: 'acc', desc: 'платина', owner: 'Хеди', pinned: true },
+    ];
+    const sets = [
+        { id: 's1', name: 'Хеди — вечер, чёрное', owner: 'Хеди', itemIds: ['i1', 'i2', 'i3'], cat: 'Вечернее', img: img('oil1.png'), imgs: [img('clover43.jpg'), img('oil1.png')] },
+        { id: 's2', name: 'Хеди — лаборатория', owner: 'Хеди', itemIds: ['i4', 'i5', 'i6'], cat: 'Офис' },
+        { id: 's3', name: 'Хеди — пробежка', owner: 'Хеди', itemIds: ['i7', 'i8'], img: img('clover43.jpg') },
+        { id: 's4', name: 'Баки — тактика', owner: 'Bucky Barnes', itemIds: ['i9', 'i10'], cat: 'Миссия', img: img('clover43.jpg') },
+        { id: 's5', name: 'Пижама на двоих', owner: '', itemIds: ['i11'], cat: 'Дом и сон' },
+        { id: 's6', name: 'Хеди — дома', owner: 'Хеди', itemIds: ['i5', 'i7'] },
+    ];
+    const extensionSettings = {
+        wardrobe: {
+            enabled: true, watcherOn: true, watcherProfile: 'Gemini Flash', visionProfile: 'Gemini Flash',
+            imgSource: 'own', imgProvider: 'openrouter', imgKey: 'sk-test', imgStyle: 'clover',
+            migr120: true, migr121: true, items, sets, autoDraw: true,
+        },
+        connectionManager: { profiles: [{ id: 'p1', name: 'Gemini Flash' }] },
+    };
+    const chatMetadata = { wardrobe: { chars: { 'Хеди': { worn: [{ uid: 'u1', itemId: 'i4', name: 'белый лабораторный халат', slot: 'outer', desc: '', img: img('item_sq2.jpg'), state: '' }, { uid: 'u2', itemId: 'i12', name: 'обручальное кольцо', slot: 'acc', pinned: true, state: '' }], off: [] } }, hist: [], extra: [] } };
+    const characters = [{ name: 'Bucky Barnes', avatar: 'Bucky Barnes.png' }, { name: 'Natasha Romanoff', avatar: 'Natasha Romanoff.png' }, { name: 'Тони Старк', avatar: 'Тони Старк.png' }];
+    const groups = [{ id: 'g1', members: ['Bucky Barnes.png', 'Natasha Romanoff.png', 'Тони Старк.png'] }];
+    const listeners = {};
+    window.__calls = [];
+    window.__lookReply = {
+        name: 'Кремовый блейзер и оливковый шёлк',
+        cat: 'вечерний',
+        prompt: 'cream oversized single-breasted blazer with tortoiseshell buttons worn open over an olive green satin cowl-neck slip midi dress, beige quilted shoulder bag on a gold chain, nude strappy high-heel sandals, gold geometric drop earrings',
+        items: [
+            { name: 'кремовый блейзер оверсайз', slot: 'outer', desc: 'однобортный, черепаховые пуговицы, носится нараспашку' },
+            { name: 'оливковое атласное платье-комбинация', slot: 'dress', desc: 'миди, вырез-хомут, тонкие бретели' },
+            { name: 'бежевая стёганая сумка на цепочке', slot: 'acc', desc: 'золотая цепочка' },
+            { name: 'бежевые босоножки на каблуке', slot: 'shoes', desc: 'тонкие ремешки' },
+            { name: 'золотые геометрические серьги', slot: 'acc', desc: 'длинные подвески' },
+            { name: 'кудри с чёлкой', slot: 'hair', desc: 'длинные' },
+            { name: 'тонкий золотой браслет', slot: 'acc', desc: 'цепочка' },
+        ],
+    };
+    const c = {
+        name1: 'Хеди', chatId: 'chat1', groupId: 'g1', characterId: undefined, groups, characters, chat: [{ mes: 'Привет', is_user: true, name: 'Хеди' }],
+        extensionSettings, chatMetadata,
+        saveSettingsDebounced() { window.__saved = (window.__saved || 0) + 1; },
+        saveMetadataDebounced() {},
+        setExtensionPrompt(k, t) { window.__inj = t; },
+        extension_prompt_types: { IN_CHAT: 1 }, extension_prompt_roles: { SYSTEM: 0 },
+        getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+        eventSource: { on(t, f) { (listeners[t] ||= []).push(f); } },
+        eventTypes: { CHAT_CHANGED: 'chat_changed', MESSAGE_RECEIVED: 'mr', MESSAGE_SWIPED: 'ms', MESSAGE_DELETED: 'md', GROUP_UPDATED: 'gu', APP_READY: 'ar' },
+        ConnectionManagerRequestService: {
+            async sendRequest(id, messages) {
+                window.__calls.push(messages);
+                await new Promise(r => setTimeout(r, Number(window.__delay ?? 1200)));
+                const sys = String(messages[0].content);
+                if (sys.includes('Разбери образ')) return { content: '```json\n' + JSON.stringify(window.__lookReply) + '\n```' };
+                if (sys.includes('Распредели образы')) {
+                    const ids = String(messages[1].content).split('\n').map(l => l.split(':')[0]);
+                    const out = {}; for (const k of ids) out[k] = /пробеж/i.test(messages[1].content.split('\n').find(l => l.startsWith(k + ':'))) ? 'спорт' : 'дом';
+                    return { content: JSON.stringify({ cats: out }) };
+                }
+                return { content: '{"changes":[]}' };
+            },
+        },
+    };
+    window.SillyTavern = { getContext: () => c };
+    window.__emit = (t, ...a) => (listeners[t] || []).forEach(f => f(...a));
+    // мини-jQuery: только то, что зовёт гардероб
+    const $ = (a) => {
+        if (typeof a === 'function') { setTimeout(a, 0); return; }
+        const el = typeof a === 'string' ? document.querySelector(a) : a;
+        return { append(h) { el?.insertAdjacentHTML('beforeend', h); return this; }, on(ev, f) { el?.addEventListener(ev, function (e) { f.call(this, e); }); return this; } };
+    };
+    window.jQuery = window.$ = $;
+    const tlog = [];
+    window.__toasts = tlog;
+    window.toastr = Object.fromEntries(['info', 'success', 'warning', 'error'].map(k => [k, (m, t) => { tlog.push([k, t, String(m)]); }]));
+    // картинки: OpenRouter «рисует» маслом (по очереди две её картинки)
+    let gen = 0;
+    window.__gens = [];
+    const realFetch = window.fetch.bind(window);
+    window.fetch = async (u, o) => {
+        if (String(u).includes('openrouter.ai')) {
+            const body = JSON.parse(o.body);
+            window.__gens.push(body);
+            await new Promise(r => setTimeout(r, Number(window.__genDelay ?? 900)));
+            const pic = (gen++ % 2) ? '/samples/oil1.png' : '/samples/oil2.png';
+            return new Response(JSON.stringify({ choices: [{ message: { images: [{ image_url: { url: location.origin + pic } }] } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        return realFetch(u, o);
+    };
+})();
+</script>
+<script type="module" src="/scripts/extensions/third-party/wardrobe/index.js"></script>
+</body>
+</html>
