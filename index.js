@@ -1233,8 +1233,11 @@ function renderLooks() {
     const s = settings();
     const owners = lookOwners();
     if (!ui.lkWho || (ui.lkWho !== '*' && !owners.includes(ui.lkWho))) {
+        // по умолчанию: кто выбран на «На них», иначе — у кого больше всего образов, иначе первый из сцены
         const me = ctx().name1;
-        ui.lkWho = (ui.who && owners.includes(ui.who) ? ui.who : '') || owners.find(n => n !== me) || owners[0] || '*';
+        const count = (n) => s.sets.filter(x => x.owner === n && inEra(x)).length;
+        const most = [...owners].sort((a, b) => count(b) - count(a))[0];
+        ui.lkWho = (ui.who && owners.includes(ui.who) ? ui.who : '') || (most && count(most) ? most : '') || owners.find(n => n !== me) || owners[0] || '*';
     }
     const all = looksShown();
     // только что добавленные (ИИ ещё разбирает или не разобрал) — наверху, а не в «Без раздела» в самом низу
