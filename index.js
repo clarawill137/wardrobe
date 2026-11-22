@@ -15,7 +15,7 @@ import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, ATLAS_EDIT, atlasTakesRefs, re
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.8.5';
+const VERSION = '1.8.6';
 
 const DEFAULTS = {
     enabled: true,
@@ -103,6 +103,14 @@ function settings() {
         s.migr183 = true;
     }
     if (!Array.isArray(s.cats) || !s.cats.length) s.cats = [...DEFAULT_CATS];
+    // 1.8.6: её «сделай в образах отдел тёплое» — в свой список разделов, после «Спортивного»
+    if (!s.migr186) {
+        if (!s.cats.some(c => norm(c) === norm('Тёплое'))) {
+            const i = s.cats.findIndex(c => norm(c) === norm('Спортивное'));
+            s.cats.splice(i >= 0 ? i + 1 : s.cats.length, 0, 'Тёплое');
+        }
+        s.migr186 = true;
+    }
     return s;
 }
 const saveSettings = () => ctx().saveSettingsDebounced();
@@ -1265,7 +1273,7 @@ function renderCloset() {
 const NEW_DAYS = 14;
 const isNewLook = (set) => !!set.at && Date.now() - set.at < NEW_DAYS * 864e5;
 const catKey = (c) => norm(c);
-const CAT_ICON = { 'повседневное': '👟', 'офис': '💼', 'вечернее': '🥂', 'спортивное': '🏃', 'дом и сон': '🌙', 'белье': '🩱', 'миссия': '🎯' };
+const CAT_ICON = { 'повседневное': '👟', 'офис': '💼', 'вечернее': '🥂', 'спортивное': '🏃', 'теплое': '🧣', 'дом и сон': '🌙', 'белье': '🩱', 'миссия': '🎯' };
 const catIcon = (c) => CAT_ICON[catKey(c)] || '🏷';
 
 /** Чьи образы бывают: сцена (кроме тебя, если у тебя пусто) + владельцы образов. */

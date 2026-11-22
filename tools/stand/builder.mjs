@@ -27,10 +27,13 @@ console.log('— стиль');
 let s = await S();
 ok(s.imgStyle === 'oil' && s.itemStyle === 'clover', `образы — ${s.imgStyle}, вещи — ${s.itemStyle} (прежний стиль)`);
 
+ok(s.cats.join('|').includes('Спортивное|Тёплое'), `раздел «Тёплое» добавлен после «Спортивного»: ${s.cats.join(', ')}`);
+
 console.log('— состав образа Хеди');
 await page.evaluate(() => Wardrobe.open('looks', 'Хеди'));
 await page.waitForFunction(() => SillyTavern.getContext().extensionSettings.wardrobe.migrSlice === true, null, { timeout: 5000 });
 await sleep(300);
+ok(await page.locator('#wd-panel').getByText('Тёплое').count() > 0, 'на странице образов есть раздел 🧣 «Тёплое» (даже пустой)');
 await page.evaluate(() => { document.querySelector('.wd-lk-card [data-act="look-open"][data-id="s1"], .wd-lk-card[data-id="s1"] [data-act="look-open"]')?.click(); });
 await sleep(300);
 if (!(await page.locator('.wd-modal [data-act="set-edit"]').count())) await page.evaluate(() => { const el = [...document.querySelectorAll('[data-act="look-open"]')].find(x => x.dataset.id === 's1'); el?.click(); });
