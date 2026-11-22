@@ -8,12 +8,14 @@ import {
     SLOTS, slotOf, normSlot, isLook, uid, esc, cut, norm, clone, cleanText, extractJson,
     CLOTHES_RE, entryFromItem, newEntry, wearOutfit, stripClothes, sortBySlot, buildInjection,
     WATCHER_SYSTEM, buildWatcherInput, applyChanges, ANALYZE_SYSTEM, parseAnalyzed, parseAliases, detachItem, dedupeChars,
+    matchScore, ownerWordsOf, DEFAULT_CATS, CORE_CATS, catList, matchCat, lookSystem, parseLook, catSystem, wornAll,
+    galleryOf, pushImg, stepImg, dropImg,
 } from './core.js';
-import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, ATLAS_EDIT, resolveConnection, generateImage, itemPrompt, setPrompt, styleHasPerson } from './draw.js';
+import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, ATLAS_EDIT, resolveConnection, generateImage, itemPrompt, setPrompt, styleHasPerson, styleShort, styleAspect } from './draw.js';
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.7.1';
+const VERSION = '1.8.0';
 
 const DEFAULTS = {
     enabled: true,
@@ -35,17 +37,51 @@ const DEFAULTS = {
     imgModel: '',
     imgNaisteraModel: '',
     imgAtlasModel: '',
-    imgStyle: 'clover',
+    imgStyle: 'oil',
     imgOnPerson: 'owner',
     faces: {},
     imgStyleCustom: '',
     autoDraw: true,
+    cats: DEFAULT_CATS,
+    lkDrawCover: true,
+    lkDrawItems: true,
+    lkHair: false,
     aliases: 'Bucky Barnes = Баки, Барнс, Джеймс\nNatasha Romanoff = Наташа, Нат, Романофф\nТони Старк = Тони, Старк, Tony',
     items: [],
     sets: [],
 };
 
 const ctx = () => SillyTavern.getContext();
+
+/**
+ * Уведомление. Плашка живёт в <dialog> (верхний слой браузера), и обычные тосты таверны оказываются ПОД ней —
+ * на странице образов во весь экран их совсем не видно. Поэтому, пока плашка открыта, тост показывается в ней самой.
+ * msg — текст; уже экранированный HTML (с &amp; / <br>) остаётся как есть.
+ */
+function toast(kind, msg, title = '👗 Гардероб', opts = {}) {
+    const panel = document.getElementById('wd-panel');
+    if (!ui.open || !panel?.classList.contains('on')) {
+        window.toastr?.[kind]?.(msg, title, opts);
+        return;
+    }
+    const s = String(msg ?? '');
+    const html = opts.escapeHtml === false || /&(amp|lt|gt|quot|#39);|<br>/.test(s) ? s : esc(s).replace(/\n/g, '<br>');
+    let host = panel.querySelector('.wd-toasts');
+    if (!host) { host = document.createElement('div'); host.className = 'wd-toasts'; panel.append(host); }
+    const el = document.createElement('div');
+    el.className = `wd-toast ${kind}`;
+    el.innerHTML = `<div class="wd-toast-txt">${title ? `<b>${esc(title)}</b>` : ''}<span>${html}</span></div><button class="wd-toast-x" aria-label="Закрыть"><i class="fa-solid fa-xmark"></i></button>`;
+    const kill = () => { el.classList.add('out'); setTimeout(() => el.remove(), 220); };
+    el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!e.target.closest('.wd-toast-x')) opts.onclick?.();
+        kill();
+    });
+    host.append(el);
+    while (host.children.length > 3) host.firstElementChild.remove();
+    const t = opts.timeOut === 0 ? 0 : (Number(opts.timeOut) || 4000);
+    if (t) setTimeout(kill, t);
+}
 
 function settings() {
     const ext = ctx().extensionSettings;
@@ -57,6 +93,9 @@ function settings() {
     if (!s.faces || typeof s.faces !== 'object') s.faces = {};
     if (!s.migr120) { if (s.imgStyle === 'sketch') s.imgStyle = 'clover'; s.migr120 = true; }
     if (!s.migr121) { if (!s.imgSource || s.imgSource === 'silly') s.imgSource = 'auto'; s.migr121 = true; }
+    // 1.8: стиль картинок — масло, полуреализм (прежний запомнен: вернуть — в ⚙ или 🎨 на странице образов)
+    if (!s.migr180) { if (s.imgStyle !== 'oil') s.imgStylePrev = s.imgStyle; s.imgStyle = 'oil'; s.migr180 = true; }
+    if (!Array.isArray(s.cats) || !s.cats.length) s.cats = [...DEFAULT_CATS];
     return s;
 }
 const saveSettings = () => ctx().saveSettingsDebounced();
@@ -182,7 +221,7 @@ function withTimeout(promise, ms) {
     return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('таймаут')), ms))]);
 }
 
-async function ask(profileName, messages, maxTokens) {
+async function ask(profileName, messages, maxTokens, minSec = 0) {
     const s = settings();
     const c = ctx();
     if (!c.ConnectionManagerRequestService?.sendRequest) throw new Error('в таверне нет Connection Manager');
@@ -191,7 +230,7 @@ async function ask(profileName, messages, maxTokens) {
     const override = s.effort ? { reasoning_effort: s.effort } : {};
     const r = await withTimeout(
         c.ConnectionManagerRequestService.sendRequest(id, messages, Number(maxTokens) || 1500, {}, override),
-        (Number(s.timeoutSec) || 60) * 1000,
+        Math.max(Number(s.timeoutSec) || 60, minSec) * 1000,
     );
     const text = typeof r === 'string' ? r : (r?.content ?? '');
     if (!String(text).trim()) throw new Error('пустой ответ модели');
@@ -266,7 +305,7 @@ async function watchMessage(mesId, { force = false } = {}) {
         dedupeChars(w.chars, s.items, cast, parseAliases(s.aliases));
     } catch (e) {
         console.warn('[Гардероб] костюмер:', e);
-        window.toastr?.warning(String(e.message || e), '👗 Гардероб', { timeOut: 5000 });
+        toast('warning', String(e.message || e), '👗 Гардероб', { timeOut: 5000 });
     } finally {
         setFabBusy(false);
     }
@@ -277,7 +316,7 @@ async function watchMessage(mesId, { force = false } = {}) {
     updateInjection();
     render();
     if (notes.length) {
-        window.toastr?.info(esc(notes.join('\n')).replace(/\n/g, '<br>'), '👗 Гардероб', { timeOut: 6000, escapeHtml: false, onclick: () => openPanel('worn') });
+        toast('info', esc(notes.join('\n')).replace(/\n/g, '<br>'), '👗 Гардероб', { timeOut: 6000, escapeHtml: false, onclick: () => openPanel('worn') });
     }
 }
 
@@ -337,7 +376,7 @@ function undoLast() {
     saveChat();
     updateInjection();
     render();
-    window.toastr?.info('Вернула как было до последнего сообщения', '👗 Гардероб', { timeOut: 2500 });
+    toast('info', 'Вернула как было до последнего сообщения', '👗 Гардероб', { timeOut: 2500 });
 }
 
 // перехватчик генерации: твоё последнее сообщение проверяем ДО ответа бота, чтобы он уже видел новую одежду
@@ -403,6 +442,114 @@ async function analyzeOutfit({ text = '', dataUrl = '' }) {
     const items = parseAnalyzed(out);
     if (!items.length) throw new Error('модель не разобрала образ (проверь, что профиль видит картинки)');
     return items;
+}
+
+// ───────────── образы: загрузка с фото или промта, разбор за кадром ─────────────
+
+const importing = new Set();   // id образов, которые сейчас разбирает ИИ
+
+/** Фото и/или готовый промт → { name, cat, prompt, items }. */
+async function analyzeLook({ text = '', dataUrl = '', withLook = false }) {
+    const s = settings();
+    const profile = s.visionProfile || s.watcherProfile;
+    const parts = [];
+    if (text) parts.push(`Готовый промт образа:\n${cut(text, 4000)}`);
+    if (dataUrl) parts.push('Фото образа — во вложении. Считай образ с фото.');
+    const content = dataUrl
+        ? [{ type: 'text', text: parts.join('\n\n') }, { type: 'image_url', image_url: { url: dataUrl } }]
+        : parts.join('\n\n');
+    const out = await ask(profile, [{ role: 'system', content: lookSystem(s.cats, withLook) }, { role: 'user', content }], 3000, 120);
+    const r = parseLook(out, s.cats, withLook);
+    if (!r.items.length) throw new Error(dataUrl ? 'модель не разобрала фото — проверь, что профиль для фото видит картинки' : 'модель не нашла в промте вещей');
+    return r;
+}
+
+/** Вещи образа → шкаф: такая же вещь уже есть у этого владельца (или общая) — берём её, иначе кладём новую. */
+function linkItems(list, owner, slice, lookId) {
+    const s = settings();
+    const ow = ownerWordsOf([...castNames(), owner].filter(Boolean), parseAliases(s.aliases));
+    const pool = s.items.filter(it => (!it.owner || it.owner === owner) && (!slice || !it.slice || it.slice === slice));
+    const ids = [];
+    const created = [];
+    for (const x of list) {
+        let best = null, score = 0;
+        for (const it of pool) {
+            if (ids.includes(it.id) || normSlot(it.slot) !== normSlot(x.slot)) continue;
+            const sc = matchScore(x, it, ow);
+            if (sc > score) { best = it; score = sc; }
+        }
+        if (best && score >= 0.8) { ids.push(best.id); continue; }
+        const it = addToCloset({ name: x.name, slot: x.slot, desc: x.desc, owner });
+        if (slice) it.slice = slice;
+        if (lookId) it.look = lookId;
+        ids.push(it.id);
+        created.push(it);
+        pool.push(it);
+    }
+    return { ids, created };
+}
+
+/** Разобрать образ за кадром: вещи — в шкаф и в образ, название, раздел, промт. Потом — картинки по очереди. */
+async function runImport(id, { dataUrl = '', drawCover = false, drawItems = false } = {}) {
+    const s = settings();
+    const set = s.sets.find(x => x.id === id);
+    if (!set || importing.has(id)) return;
+    importing.add(id);
+    set.pending = true;
+    delete set.err;
+    render();
+    try {
+        if (!dataUrl && set.src?.img) dataUrl = await toJpeg(await urlToDataUrl(set.src.img), 1024, 0.85);
+        const r = await analyzeLook({ text: set.src?.text || '', dataUrl, withLook: !!set.src?.look });
+        const now = settings().sets.find(x => x.id === id);
+        if (!now) return; // образ удалили, пока разбирался
+        const { ids, created } = linkItems(r.items, now.owner || '', now.slice || '', id);
+        now.itemIds = ids;
+        if (r.prompt) now.prompt = r.prompt;
+        if (!now.named && r.name) now.name = r.name;
+        if (!now.cat && r.cat) now.cat = r.cat;
+        delete now.pending;
+        delete now.err;
+        saveSettings();
+        const jobs = [];
+        if (drawCover && canDraw()) jobs.push({ kind: 'set', id });
+        if (drawItems && canDraw()) jobs.push(...created.map(it => ({ id: it.id, ref: dataUrl || '' })));
+        const drawTxt = jobs.length ? ` Рисую: ${[drawCover && canDraw() ? 'образ' : '', drawItems && created.length ? `${created.length} ${plural(created.length, 'вещь', 'вещи', 'вещей')}` : ''].filter(Boolean).join(' + ')}.` : '';
+        toast('success', esc(`«${now.name}»${now.cat ? ` → ${now.cat}` : ''}: ${ids.length} ${plural(ids.length, 'вещь', 'вещи', 'вещей')}${created.length < ids.length ? ` (${ids.length - created.length} уже были в шкафу)` : ''}.${drawTxt}`), '👗 Образ разобран', { timeOut: 5000 });
+        if (jobs.length) queueDraw(jobs);
+    } catch (e) {
+        console.warn('[Гардероб] разбор образа', e);
+        const now = settings().sets.find(x => x.id === id);
+        if (now) { delete now.pending; now.err = String(e?.message || e).slice(0, 220); saveSettings(); }
+        toast('warning', esc(String(e?.message || e)), '👗 Образ не разобрался', { timeOut: 8000 });
+    } finally {
+        importing.delete(id);
+        render();
+    }
+}
+
+/** Образы без раздела → разделы одним запросом. Возвращает, скольким назначила. */
+async function autoCategorize(list) {
+    const s = settings();
+    const map = {};
+    const lines = list.slice(0, 60).map((set, i) => {
+        const k = `l${i + 1}`;
+        map[k] = set.id;
+        const its = (set.itemIds || []).map(closetItem).filter(Boolean).map(it => it.name);
+        return `${k}: ${set.name}${its.length ? ` — ${its.join(', ')}` : ''}${set.prompt ? ` (${cut(set.prompt, 160)})` : ''}`;
+    });
+    if (!lines.length) return 0;
+    const out = await ask(s.watcherProfile || s.visionProfile, [{ role: 'system', content: catSystem(s.cats) }, { role: 'user', content: lines.join('\n') }], 1500, 90);
+    const j = extractJson(out) || {};
+    const got = j.cats && typeof j.cats === 'object' ? j.cats : j;
+    let n = 0;
+    for (const [k, c] of Object.entries(got || {})) {
+        const set = s.sets.find(x => x.id === map[k]);
+        const cat = matchCat(c, s.cats);
+        if (set && cat) { set.cat = cat; n++; }
+    }
+    saveSettings();
+    return n;
 }
 
 // ───────────── картинки вещей ─────────────
@@ -543,20 +690,20 @@ function itemWearer(it) {
     for (const [name, st] of Object.entries(w?.chars || {})) {
         if ([...(st?.worn || []), ...(st?.off || [])].some(e => e.itemId === it.id)) return name;
     }
-    return ui.tab === 'worn' ? ui.who : '';
+    return ui.tab === 'worn' ? ui.who : ui.tab === 'looks' && ui.lkWho !== '*' ? ui.lkWho : '';
 }
 
 let faceWarned = new Set();
 function noteFace(name, ref) {
     if (ref || !name || faceWarned.has(name)) return;
     faceWarned.add(name);
-    window.toastr?.info(`Не нашла лицо для «${esc(name)}» — нарисовала на модели. Загрузи: «На них» → ${esc(shortName(name))} → ⋮ → Лицо для картинок.`, '👗 Гардероб', { timeOut: 9000 });
+    toast('info', `Не нашла лицо для «${esc(name)}» — нарисовала на модели. Загрузи: «На них» → ${esc(shortName(name))} → ⋮ → Лицо для картинок.`, '👗 Гардероб', { timeOut: 9000 });
 }
 
 const REF_TYPES = ['openrouter', 'gemini', 'naistera', 'atlas'];
 
 function waitToast(sec, status) {
-    window.toastr?.info(status === 429 ? `Сервис просит не так часто — жду ${sec} с и пробую снова` : `Сервис картинок сбоит — повтор через ${sec} с`, '👗 Гардероб', { timeOut: Math.min(sec, 8) * 1000 });
+    toast('info', status === 429 ? `Сервис просит не так часто — жду ${sec} с и пробую снова` : `Сервис картинок сбоит — повтор через ${sec} с`, '👗 Гардероб', { timeOut: Math.min(sec, 8) * 1000 });
 }
 
 /** Нарисовать картинку вещи шкафа. ref — фото-образец (data:URL), по нему рисуется именно эта вещь. */
@@ -579,22 +726,18 @@ async function drawItem(id, { ref = '' } = {}) {
         const prompt = itemPrompt(it, s, { personRef: !!person, photoRef: !!(ref && canRef) });
         let out;
         try {
-            out = await generateImage(conn, prompt, refs, { aspect: styleHasPerson(s, it.slot) ? '4:3' : '1:1', onWait: waitToast });
+            out = await generateImage(conn, prompt, refs, { aspect: styleAspect(s, it.slot), onWait: waitToast });
         } catch (e) {
             if (person && e?.status !== 429 && (e?.status >= 500 || e?.status === 451 || /moderat|safety|celebr|policy|blocked/i.test(String(e?.message)))) {
                 e.message += `\n\nПохоже, сервис отказался рисовать по лицу «${who}» (${face?.from}). Grok и Nano Banana часто блокируют лица реальных актёров. Варианты: загрузи для ${shortName(who)} арт-лицо (рисованное, не фото актёра) через ⋮ → «Лицо для картинок», или смени «Модель Naistera для вещей» в ⚙.`;
             }
             throw e;
         }
-        const path = await uploadImage(await toJpeg(await urlToDataUrl(out)));
-        it.img = path;
+        const path = await uploadImage(await toJpeg(await urlToDataUrl(out), 900));
+        pushImg(it, path);
         it.drawn = true;
-        const w = chatState();
-        for (const st of Object.values(w?.chars || {})) {
-            for (const e of [...(st?.worn || []), ...(st?.off || [])]) if (e.itemId === id) e.img = path;
-        }
+        syncItemImg(it);
         saveSettings();
-        saveChat();
     } finally {
         drawing.delete(id);
         paintDrawing();
@@ -608,33 +751,39 @@ async function drawSet(id) {
     const conn = imgConnection();
     if (conn.error) throw new Error(conn.error);
     const its = set.itemIds.map(closetItem).filter(Boolean);
-    if (!its.length) throw new Error('в комплекте нет вещей');
+    if (!its.length && !set.prompt && !set.src?.img) throw new Error('в образе нет вещей');
     drawing.add(id);
     paintDrawing();
     try {
         const canRef = REF_TYPES.includes(conn.apiType);
         const wantFace = canRef && s.imgOnPerson !== 'model' && styleHasPerson(s);
-        const who = set.owner || (ui.tab === 'worn' ? ui.who : '');
+        const who = set.owner || lookTarget(set) || (ui.tab === 'worn' ? ui.who : '');
         const face = wantFace ? await personRefFor(who) : null;
         if (wantFace) noteFace(who, face);
         const person = face?.dataUrl || '';
+        // загруженное фото образа (импорт) — главный реф одежды; иначе — картинки вещей
+        let outfit = '';
+        if (canRef && set.src?.img && (ATLAS_EDIT[conn.model]?.max ?? 5) > (person ? 1 : 0)) {
+            try { outfit = await toJpeg(await urlToDataUrl(set.src.img), 900, 0.86); } catch { outfit = ''; }
+        }
         const itemRefs = [];
-        if (canRef) {
+        if (canRef && !outfit) {
             for (const it of its.filter(x => x.img).slice(0, person ? 4 : 5)) {
                 try { itemRefs.push(await toJpeg(await urlToDataUrl(it.img), 512, 0.85)); } catch { /* без этой картинки */ }
             }
         }
-        const refs = [person, ...itemRefs].filter(Boolean);
+        const refs = [person, outfit, ...itemRefs].filter(Boolean);
         let out;
         try {
-            out = await generateImage(conn, setPrompt(set, its, s, { itemRefs: itemRefs.length > 0, personRef: !!person }), refs, { aspect: styleHasPerson(s) ? '4:3' : '1:1', onWait: waitToast });
+            out = await generateImage(conn, setPrompt(set, its, s, { itemRefs: itemRefs.length > 0, personRef: !!person, outfitRef: !!outfit }), refs, { aspect: styleAspect(s), onWait: waitToast });
         } catch (e) {
             if (person && e?.status !== 429 && (e?.status >= 500 || e?.status === 451 || /moderat|safety|celebr|policy|blocked/i.test(String(e?.message)))) {
                 e.message += `\n\nПохоже, сервис отказался рисовать по лицу «${who}» (${face?.from}). Grok и Nano Banana часто блокируют лица реальных актёров — загрузи арт-лицо через ⋮ → «Лицо для картинок» или смени модель в ⚙.`;
             }
             throw e;
         }
-        set.img = await uploadImage(await toJpeg(await urlToDataUrl(out), 1024));
+        const live = settings().sets.find(x => x.id === id);
+        if (live) pushImg(live, await uploadImage(await toJpeg(await urlToDataUrl(out), 1280)));
         saveSettings();
     } finally {
         drawing.delete(id);
@@ -663,7 +812,7 @@ async function runDrawQueue() {
                 done++;
             } catch (e) {
                 console.warn('[Гардероб] рисование', e);
-                window.toastr?.warning(esc(String(e.message || e)).replace(/\n/g, '<br>'), '👗 Гардероб: картинка не нарисовалась', { timeOut: 0, extendedTimeOut: 0, closeButton: true, escapeHtml: false });
+                toast('warning', esc(String(e.message || e)).replace(/\n/g, '<br>'), '👗 Гардероб: картинка не нарисовалась', { timeOut: 0, extendedTimeOut: 0, closeButton: true, escapeHtml: false });
                 drawQ.length = 0;
             }
         }
@@ -671,16 +820,16 @@ async function runDrawQueue() {
         drawBusy = false;
         drawQ.length = 0;
         render();
-        if (done > 1) window.toastr?.success(`Нарисовано: ${done}`, '👗 Гардероб', { timeOut: 2500 });
+        if (done > 1) toast('success', `Нарисовано: ${done}`, '👗 Гардероб', { timeOut: 2500 });
     }
 }
 
 /** Точечно обновить картинки/спиннеры, не перерисовывая всю плашку (модалка не закрывается). */
 function paintDrawing() {
-    document.querySelectorAll('#wd-panel [data-draw-id]').forEach(el => {
+    document.querySelectorAll('#wd-panel [data-draw-id]:not(.wd-lk-img)').forEach(el => {
         const id = el.dataset.drawId;
         el.classList.toggle('wd-drawing', drawing.has(id));
-        const obj = closetItem(id) || settings().sets.find(x => x.id === id);
+        const obj = imgOwner(id);
         const img = el.querySelector('img');
         if (obj?.img && (!img || img.getAttribute('src') !== obj.img)) {
             el.querySelector('span')?.remove();
@@ -688,6 +837,8 @@ function paintDrawing() {
             else el.insertAdjacentHTML('afterbegin', `<img src="${esc(obj.img)}" alt="" loading="lazy">`);
         }
     });
+    paintGallery();
+    paintLooks();
     const stop = document.querySelector('#wd-panel [data-act="draw-stop"]');
     if (stop && !drawBusy) render();
 }
@@ -695,6 +846,19 @@ function paintDrawing() {
 // ───────────── операции ─────────────
 
 function closetItem(id) { return settings().items.find(x => x.id === id); }
+
+/** Вещь шкафа или образ по id (у них общие версии картинок). */
+function imgOwner(id) { return closetItem(id) || settings().sets.find(x => x.id === id) || null; }
+
+/** Картинка вещи сменилась — та же картинка у неё на персонажах в этом чате. */
+function syncItemImg(it) {
+    const w = chatState();
+    let n = 0;
+    for (const st of Object.values(w?.chars || {})) {
+        for (const e of [...(st?.worn || []), ...(st?.off || [])]) if (e.itemId === it.id && e.img !== (it.img || '')) { e.img = it.img || ''; n++; }
+    }
+    if (n) saveChat();
+}
 
 // ───────────── облик (ядро «Священный таймлайн») ─────────────
 // Один человек в разные эпохи — разные облики (сержант 1943-го и он же в 2024-м), и шкаф у каждого облика свой.
@@ -810,7 +974,8 @@ function setPinned(entryOrItemId, on) {
 
 // ───────────── интерфейс ─────────────
 
-const ui = { open: false, tab: 'worn', who: '', q: '', slot: 'all', owner: 'all', draft: null, allEras: false };
+// lkWho — чьи образы на странице коллекции ('*' — все), lkCat — раздел ('all', 'new', 'none' или название)
+const ui = { open: false, tab: 'worn', who: '', q: '', slot: 'all', owner: 'all', draft: null, allEras: false, lkWho: '', lkCat: 'all', prevTab: 'worn', shownTab: '' };
 
 function profileOptions(selected, empty = '— выбери профиль —') {
     return `<option value="">${esc(empty)}</option>`
@@ -888,7 +1053,7 @@ function renderWorn() {
     <div class="wd-actions-row">
         <button class="wd-btn primary" data-act="pick-closet"><i class="fa-solid fa-box-archive"></i> Из шкафа</button>
         <button class="wd-btn" data-act="new-item"><i class="fa-solid fa-wand-magic-sparkles"></i> Новое</button>
-        <button class="wd-btn" data-act="pick-set"><i class="fa-solid fa-layer-group"></i> Комплект</button>
+        <button class="wd-btn" data-act="pick-set"><i class="fa-solid fa-layer-group"></i> Образы</button>
     </div>
     <div class="wd-sec">Надето</div>
     ${worn.length ? `<div class="wd-list">${worn.map(e => entryRow(e, 'worn')).join('')}</div>`
@@ -961,24 +1126,388 @@ function renderCloset() {
         : `<div class="wd-empty"><div class="wd-empty-ico">🧺</div>${settings().items.length ? 'Ничего не нашлось.' : 'Шкаф пустой. Добавь вещь текстом, промптом образа или фоткой — ИИ разложит на вещи.'}</div>`}`;
 }
 
-function renderSets() {
+// ───── коллекция образов: страница на весь экран (1.8) ─────
+// Сверху — кнопка на каждого персонажа и «✦ все», под ними разделы (Офис, Вечернее, Спортивное…),
+// дальше — карточки образов в две колонки: картинка целиком, «Надеть», ⧉ промт, 👕 что внутри.
+
+const NEW_DAYS = 14;
+const isNewLook = (set) => !!set.at && Date.now() - set.at < NEW_DAYS * 864e5;
+const catKey = (c) => norm(c);
+const CAT_ICON = { 'повседневное': '👟', 'офис': '💼', 'вечернее': '🥂', 'спортивное': '🏃', 'дом и сон': '🌙', 'белье': '🩱', 'миссия': '🎯' };
+const catIcon = (c) => CAT_ICON[catKey(c)] || '🏷';
+
+/** Чьи образы бывают: сцена (кроме тебя, если у тебя пусто) + владельцы образов. */
+function lookOwners() {
+    const out = [];
+    const add = (n) => { if (n && !out.includes(n)) out.push(n); };
+    const sets = settings().sets.filter(inEra);
+    const me = ctx().name1;
+    for (const n of castNames()) if (n !== me || sets.some(x => x.owner === n)) add(n);
+    for (const set of sets) add(set.owner);
+    if (ui.lkWho && ui.lkWho !== '*') add(ui.lkWho);
+    return out;
+}
+
+/** На кого надевать образ со страницы: выбранный персонаж, а в «✦ все» — владелец образа. */
+function lookTarget(set) {
+    if (ui.lkWho && ui.lkWho !== '*') return ui.lkWho;
+    return set?.owner || '';
+}
+
+function lookWornBy(set, who) {
+    const st = who ? chatState()?.chars?.[who] : null;
+    return !!st && wornAll(st, set);
+}
+
+/** Образы на странице: выбранного персонажа (+ общие) или все. */
+function looksShown() {
+    const list = settings().sets.filter(inEra);
+    if (!ui.lkWho || ui.lkWho === '*') return list;
+    return list.filter(x => !x.owner || x.owner === ui.lkWho);
+}
+
+function looksIn(list, cat) {
+    if (cat === 'all') return list;
+    if (cat === 'new') return list.filter(isNewLook);
+    if (cat === 'none') return list.filter(x => !x.cat);
+    return list.filter(x => x.cat && catKey(x.cat) === catKey(cat));
+}
+
+/** Разделы этого персонажа: её три — всегда, остальные — если в них что-то есть; свои разделы образов — тоже. */
+function lookCats(list) {
     const s = settings();
-    return `<div class="wd-actions-row">
-        <button class="wd-btn primary" data-act="set-new"><i class="fa-solid fa-plus"></i> Собрать комплект</button>
-    </div>
-    ${s.sets.filter(inEra).length ? `<div class="wd-sets">${s.sets.filter(inEra).map(set => {
-        const its = set.itemIds.map(closetItem).filter(Boolean);
-        return `<div class="wd-set">
-            <div class="wd-set-head">
-                <div><div class="wd-set-name">${esc(set.name)}</div><div class="wd-row-meta">${its.length} ${plural(its.length, 'вещь', 'вещи', 'вещей')}${set.owner ? ` · ${esc(set.owner)}` : ''}</div></div>
-                <button class="wd-dots" data-act="set-menu" data-id="${esc(set.id)}"><i class="fa-solid fa-ellipsis"></i></button>
+    const out = [];
+    const add = (c) => { if (c && !out.some(x => catKey(x) === catKey(c))) out.push(c); };
+    for (const c of s.cats) if (CORE_CATS.some(k => catKey(k) === catKey(c)) || list.some(x => x.cat && catKey(x.cat) === catKey(c))) add(c);
+    for (const x of list) if (x.cat) add(x.cat);
+    return out;
+}
+
+/** Что копирует ⧉: промт образа, а если его нет — состав по вещам. */
+function lookPromptText(set) {
+    if (set.prompt) return set.prompt;
+    const its = (set.itemIds || []).map(closetItem).filter(Boolean);
+    return its.length ? `${set.name}: ${its.map(it => `${it.name}${it.desc ? ` (${cut(it.desc, 140)})` : ''}`).join('; ')}` : set.name;
+}
+
+/** Картинка образа: обложка, а без неё — плитки его вещей (картинка или значок) и «нарисовать». */
+function lookImgHtml(set) {
+    const img = set.img;
+    const fit = `onload="this.parentNode.classList.add(Math.abs(this.naturalWidth/this.naturalHeight-0.667)<0.07?'wd-fit':'wd-odd')"`;
+    if (img) return `<img class="wd-lk-bg" src="${esc(img)}" alt="" aria-hidden="true"><img class="wd-lk-fg" src="${esc(img)}" alt="" loading="lazy" ${fit}>`;
+    const its = (set.itemIds || []).map(closetItem).filter(Boolean).slice(0, 4);
+    const tiles = its.length
+        ? `<div class="wd-lk-tiles n${its.length}">${its.map(it => `<span>${it.img ? `<img src="${esc(it.img)}" alt="" loading="lazy">` : slotOf(it.slot).i}</span>`).join('')}</div>`
+        : `<div class="wd-lk-ph-ico">${set.cat ? catIcon(set.cat) : '🎽'}</div>`;
+    return `<div class="wd-lk-ph">${tiles}${set.pending ? '' : '<small><i class="fa-solid fa-palette"></i> нарисовать образ</small>'}</div>`;
+}
+
+function lookCard(set) {
+    const id = esc(set.id);
+    const gal = galleryOf(set);
+    const who = lookTarget(set);
+    const on = !!who && lookWornBy(set, who);
+    const busy = !!set.pending && importing.has(set.id);
+    const err = set.err || (set.pending && !importing.has(set.id) ? 'разбор прервался' : '');
+    const empty = !(set.itemIds || []).length;
+    const inner = `
+        <div class="wd-lk-img${set.img ? '' : ' wd-noimg'}${drawing.has(set.id) ? ' wd-drawing' : ''}" data-act="look-open" data-id="${id}" data-draw-id="${id}" data-gal="${gal.length}">${lookImgHtml(set)}</div>
+        <button class="wd-lk-info" data-act="look-open" data-id="${id}" title="Что в образе"><i class="fa-solid fa-shirt"></i></button>
+        ${gal.length > 1 ? `<div class="wd-lk-dots">${gal.slice(-6).map(g => `<i class="${g === set.img ? 'on' : ''}"></i>`).join('')}</div>` : ''}
+        ${on ? '<div class="wd-lk-badge"><i class="fa-solid fa-check"></i> надето</div>' : ui.lkWho === '*' && set.owner ? `<div class="wd-lk-owner">${esc(shortName(set.owner))}</div>` : !set.owner ? '<div class="wd-lk-owner">общий</div>' : ''}
+        ${busy ? '<div class="wd-lk-busy"><span class="wd-lk-spin"></span>ИИ разбирает образ…</div>' : ''}
+        ${err && !busy ? `<button class="wd-lk-err" data-act="look-retry" data-id="${id}"><i class="fa-solid fa-rotate-right"></i> ${esc(cut(err, 46))}</button>` : ''}
+        <div class="wd-lk-foot">
+            <div class="wd-lk-name">${esc(set.name)}</div>
+            <div class="wd-lk-btns">
+                <button class="wd-lk-wear${on ? ' on' : ''}" data-act="look-wear" data-id="${id}" ${busy || empty ? 'disabled' : ''}>${on ? '<i class="fa-solid fa-check"></i> Надето' : 'Надеть'}</button>
+                <button class="wd-lk-copy" data-act="look-copy" data-id="${id}" title="Скопировать промт" ${busy ? 'disabled' : ''}><i class="fa-solid fa-copy"></i></button>
             </div>
-            ${set.img || drawing.has(set.id) ? `<div class="wd-set-cover${drawing.has(set.id) ? ' wd-drawing' : ''}" data-draw-id="${esc(set.id)}">${set.img ? `<img src="${esc(set.img)}" alt="" loading="lazy">` : '<span>🎨</span>'}</div>` : ''}
-            <div class="wd-set-items">${its.map(it => `<div class="wd-set-item" title="${esc(it.name)}">${thumb(it, 'wd-set-thumb')}<span>${esc(cut(it.name, 26))}</span></div>`).join('')}</div>
-            <button class="wd-btn primary full" data-act="set-wear" data-id="${esc(set.id)}"><i class="fa-solid fa-shirt"></i> Надеть на…</button>
         </div>`;
-    }).join('')}</div>`
-        : `<div class="wd-empty"><div class="wd-empty-ico">🎽</div>Комплектов нет. Собери из вещей шкафа или сохрани то, что сейчас надето на персонаже (меню ⋮ у персонажа).</div>`}`;
+    return `<div class="wd-lk-card${on ? ' on' : ''}" data-id="${id}" data-key="${hashText(inner)}">${inner}</div>`;
+}
+
+const lookGrid = (list) => `<div class="wd-lk-grid">${list.map(lookCard).join('')}</div>`;
+
+function renderLooks() {
+    const s = settings();
+    const owners = lookOwners();
+    if (!ui.lkWho || (ui.lkWho !== '*' && !owners.includes(ui.lkWho))) {
+        const me = ctx().name1;
+        ui.lkWho = (ui.who && owners.includes(ui.who) ? ui.who : '') || owners.find(n => n !== me) || owners[0] || '*';
+    }
+    const all = looksShown();
+    // только что добавленные (ИИ ещё разбирает или не разобрал) — наверху, а не в «Без раздела» в самом низу
+    const fresh = all.filter(x => x.pending || x.err);
+    const settled = all.filter(x => !x.pending && !x.err);
+    const cats = lookCats(settled);
+    const nNew = looksIn(all, 'new').length;
+    const nNone = looksIn(settled, 'none').length;
+    if (ui.lkCat === 'new' && !nNew) ui.lkCat = 'all';
+    if (ui.lkCat === 'none' && !nNone) ui.lkCat = 'all';
+    if (!['all', 'new', 'none'].includes(ui.lkCat) && !cats.some(c => catKey(c) === catKey(ui.lkCat))) ui.lkCat = 'all';
+    const whoName = ui.lkWho === '*' ? 'Все персонажи' : ui.lkWho;
+    const chip = (k, label, n) => `<button class="wd-chip ${ui.lkCat === k ? 'on' : ''}" data-act="look-cat" data-cat="${esc(k)}">${label}${n ? `<small>${n}</small>` : ''}</button>`;
+    const head = `<div class="wd-lk-head">
+        <div class="wd-lk-top">
+            <button class="wd-lk-round" data-act="look-back" title="Назад в гардероб"><i class="fa-solid fa-arrow-left"></i></button>
+            <div class="wd-lk-title">Коллекция образов</div>
+            <button class="wd-lk-round" data-act="close" title="Закрыть"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <div class="wd-lk-row1">
+            <div class="wd-lk-whos">
+                <button class="wd-lk-who all ${ui.lkWho === '*' ? 'on' : ''}" data-act="look-who" data-name="*" title="Все персонажи"><span>✦</span></button>
+                ${owners.map(n => `<button class="wd-lk-who ${ui.lkWho === n ? 'on' : ''}" data-act="look-who" data-name="${esc(n)}" title="${esc(n)}">${avatar(n)}</button>`).join('')}
+            </div>
+            <button class="wd-lk-add" data-act="look-add"><i class="fa-solid fa-plus"></i> Образ</button>
+        </div>
+        <div class="wd-lk-sub">
+            <span><b>${esc(cut(whoName, 28))}</b> · ${all.length} ${plural(all.length, 'образ', 'образа', 'образов')}</span>
+            <button class="wd-lk-style" data-act="look-style" title="Стиль картинок"><i class="fa-solid fa-palette"></i> ${esc(styleShort(s))}</button>
+        </div>
+        <div class="wd-chips wd-lk-cats">
+            ${chip('all', 'Все', '')}
+            ${nNew ? chip('new', '✦ Новинки', nNew) : ''}
+            ${cats.map(c => chip(c, `${catIcon(c)} ${esc(c)}`, looksIn(all, c).length)).join('')}
+            ${nNone ? chip('none', 'Без раздела', nNone) : ''}
+            ${eraOn() ? `<button class="wd-chip ${ui.allEras ? 'on' : ''}" data-act="all-eras">🕰 Все эпохи</button>` : ''}
+        </div>
+    </div>`;
+
+    if (!all.length) {
+        return `${head}<div class="wd-lk-empty">
+            <div class="wd-empty-ico">🎽</div>
+            <b>${ui.lkWho === '*' ? 'Образов пока нет' : `У ${esc(shortName(ui.lkWho))} пока нет образов`}</b>
+            <p>Загрузи фото образа или вставь готовый промт — ИИ сам считает его, разложит на вещи и положит их в шкаф.</p>
+            <button class="wd-btn primary" data-act="look-add"><i class="fa-solid fa-plus"></i> Новый образ</button>
+            <div class="wd-actions-row">
+                <button class="wd-btn" data-act="set-new"><i class="fa-solid fa-box-archive"></i> Собрать из шкафа</button>
+                ${ui.lkWho !== '*' && charState(ui.lkWho)?.worn?.length ? '<button class="wd-btn" data-act="look-from-worn"><i class="fa-solid fa-person-dress"></i> Что надето сейчас</button>' : ''}
+            </div>
+        </div>`;
+    }
+
+    const prof = s.watcherProfile || s.visionProfile;
+    const sortBtn = nNone && prof && ['all', 'none'].includes(ui.lkCat)
+        ? `<button class="wd-lk-sort" data-act="look-autocat"><i class="fa-solid fa-wand-magic-sparkles"></i> Разложить ${nNone} ${plural(nNone, 'образ', 'образа', 'образов')} без раздела по разделам (ИИ)</button>` : '';
+    let body = '';
+    if (ui.lkCat === 'all') {
+        const groups = [...cats.map(c => [c, looksIn(settled, c)]), ['none', looksIn(settled, 'none')]].filter(([, l]) => l.length);
+        body = (fresh.length ? `<div class="wd-lk-sec fresh"><span>✦ Только что добавлено</span><small>${fresh.length}</small></div>${lookGrid(fresh)}` : '')
+            + groups.map(([c, l]) => `<div class="wd-lk-sec" data-act="look-cat" data-cat="${esc(c)}"><span>${c === 'none' ? 'Без раздела' : `${catIcon(c)} ${esc(c)}`}</span><small>${l.length}</small></div>${lookGrid(l)}`).join('');
+    } else {
+        const list = ui.lkCat === 'none' ? looksIn(settled, 'none') : looksIn(all, ui.lkCat);
+        const label = ui.lkCat === 'new' ? 'Новинки' : ui.lkCat === 'none' ? 'Без раздела' : ui.lkCat;
+        body = list.length ? lookGrid(list)
+            : `<div class="wd-lk-empty small"><div class="wd-empty-ico">${catIcon(ui.lkCat)}</div>В разделе «${esc(label)}»${ui.lkWho !== '*' ? ` у ${esc(shortName(ui.lkWho))}` : ''} пока пусто.
+                <button class="wd-btn primary" data-act="look-add"><i class="fa-solid fa-plus"></i> Добавить образ</button></div>`;
+    }
+    return `${head}${sortBtn}${body}<div class="wd-lk-tip">Свайп по картинке — прежние версии. 👕 — что в образе, промт и правка.</div>`;
+}
+
+/** Точечно обновить карточки образов (картинка дорисовалась, разбор закончился), не трогая прокрутку и модалку. */
+function paintLooks() {
+    if (!ui.open || ui.tab !== 'looks') return;
+    const s = settings();
+    document.querySelectorAll('#wd-panel .wd-body .wd-lk-card[data-id]').forEach(card => {
+        const set = s.sets.find(x => x.id === card.dataset.id);
+        if (!set) { card.remove(); return; }
+        const html = lookCard(set);
+        const key = html.match(/data-key="([^"]*)"/)?.[1];
+        if (key !== card.dataset.key) card.outerHTML = html;
+    });
+}
+
+/** Блок версий картинки под большой картинкой в модалке: ‹ 2 / 3 › и «убрать эту». */
+function galHtml(obj) {
+    const g = galleryOf(obj);
+    if (!obj?.img && !g.length) return `<div class="wd-gal" data-gal-for="${esc(obj?.id || '')}"></div>`;
+    const i = Math.max(0, g.indexOf(obj.img));
+    return `<div class="wd-gal" data-gal-for="${esc(obj.id)}">
+        ${g.length > 1 ? `<button class="wd-gal-btn" data-act="img-step" data-id="${esc(obj.id)}" data-dir="-1" title="Предыдущая"><i class="fa-solid fa-chevron-left"></i></button>
+        <span class="wd-gal-n">версия ${i + 1} из ${g.length}</span>
+        <button class="wd-gal-btn" data-act="img-step" data-id="${esc(obj.id)}" data-dir="1" title="Следующая"><i class="fa-solid fa-chevron-right"></i></button>` : '<span class="wd-gal-n">одна версия</span>'}
+        <button class="wd-link" data-act="img-drop" data-id="${esc(obj.id)}">убрать эту</button>
+    </div>`;
+}
+
+function bigImgHtml(obj, fallback = '🎨') {
+    return `<div class="wd-big tall${drawing.has(obj.id) ? ' wd-drawing' : ''}" data-draw-id="${esc(obj.id)}">${obj.img ? `<img src="${esc(obj.img)}" alt="">` : `<span>${fallback}</span>`}</div>${galHtml(obj)}`;
+}
+
+/** Обновить блок версий в открытой модалке. */
+function paintGallery() {
+    document.querySelectorAll('#wd-panel .wd-modal [data-gal-for]').forEach(el => {
+        const obj = imgOwner(el.dataset.galFor);
+        if (obj) el.outerHTML = galHtml(obj);
+    });
+}
+
+/** Листнуть картинку вещи/образа (свайп по карточке или ‹ › в модалке). */
+function stepImage(id, dir) {
+    const obj = imgOwner(id);
+    if (!obj || galleryOf(obj).length < 2) return;
+    stepImg(obj, dir);
+    if (closetItem(id)) syncItemImg(obj);
+    saveSettings();
+    document.querySelectorAll(`#wd-panel .wd-modal [data-draw-id="${CSS.escape(id)}"] img`).forEach(img => { img.src = obj.img; });
+    paintGallery();
+    if (ui.tab === 'looks') paintLooks(); else if (closetItem(id)) render();
+}
+
+function catSelect(value, attr, { auto = false } = {}) {
+    const cats = settings().cats;
+    const known = !value || cats.some(c => catKey(c) === catKey(value));
+    return `<select ${attr}>
+        ${auto ? `<option value="" ${!value ? 'selected' : ''}>✦ Авто (ИИ)</option>` : `<option value="" ${!value ? 'selected' : ''}>без раздела</option>`}
+        ${cats.map(c => `<option value="${esc(c)}" ${value && catKey(c) === catKey(value) ? 'selected' : ''}>${catIcon(c)} ${esc(c)}</option>`).join('')}
+        ${known ? '' : `<option value="${esc(value)}" selected>${esc(value)}</option>`}
+        <option value="__new">＋ свой раздел…</option>
+    </select>`;
+}
+
+/** Значение раздела из формы: выбранный или вписанный свой (тогда он добавляется в список разделов). */
+function readCat(box, attr) {
+    const sel = box.querySelector(`[${attr}]`);
+    let v = sel?.value || '';
+    if (v === '__new') {
+        v = String(box.querySelector('[data-input="catnew"]')?.value || '').trim().slice(0, 40);
+        if (v) {
+            const s = settings();
+            if (!s.cats.some(c => catKey(c) === catKey(v))) { s.cats = catList([...s.cats, v]); saveSettings(); }
+        }
+    }
+    return v;
+}
+
+/** «＋ Образ»: фото образа и/или готовый промт → ИИ разберёт за кадром. */
+function lookAddModal({ owner, cat } = {}) {
+    const s = settings();
+    const who = owner ?? (ui.lkWho && ui.lkWho !== '*' ? ui.lkWho : ui.who || '');
+    const c = cat ?? (['all', 'new', 'none'].includes(ui.lkCat) ? '' : ui.lkCat);
+    const prof = s.visionProfile || s.watcherProfile;
+    ui.draft = { kind: 'look', dataUrl: '', img: '', uploading: false };
+    openModal('Новый образ', `
+        ${prof ? '' : '<div class="wd-hint" data-act="tab" data-tab="cfg"><i class="fa-solid fa-circle-info"></i> Выбери в ⚙ профиль для фото — эта модель считывает образы и раскладывает их на вещи.</div>'}
+        <label class="wd-lk-drop">
+            <input type="file" accept="image/*" data-input="lkfile" hidden>
+            <div class="wd-lk-drop-prev"></div>
+            <span class="wd-lk-drop-t"><i class="fa-solid fa-camera"></i> Фото образа</span>
+            <small>ИИ считает с него промт и разложит на вещи</small>
+        </label>
+        <div class="wd-or"><span>или / и</span></div>
+        <div class="wd-field"><label>Готовый промт образа</label>
+            <textarea rows="4" data-input="lktext" placeholder="вставь промт — например, скопированный из коллекции нарядов"></textarea></div>
+        <div class="wd-grid2">
+            <div class="wd-field"><label>Чей</label>${ownerSelect(who, 'data-input="lkowner"')}</div>
+            <div class="wd-field"><label>Раздел</label>${catSelect(c, 'data-input="lkcat"', { auto: true })}</div>
+        </div>
+        <div class="wd-field"><label>Название <small>(пусто — придумает ИИ)</small></label><input type="text" data-input="lkname" placeholder="например: Кремовый блейзер и шёлк"></div>
+        <label class="wd-switch"><input type="checkbox" data-input="lkcover" ${s.lkDrawCover && canDraw() ? 'checked' : ''}><span></span>Нарисовать образ на персонаже — стиль «${esc(styleShort(s))}», лицо из рефов</label>
+        <label class="wd-switch"><input type="checkbox" data-input="lkitems" ${s.lkDrawItems && canDraw() ? 'checked' : ''}><span></span>Нарисовать новые вещи для шкафа</label>
+        <label class="wd-switch"><input type="checkbox" data-input="lkhair" ${s.lkHair ? 'checked' : ''}><span></span>Взять и причёску с макияжем (обычно не надо — у персонажа свои)</label>
+        <button class="wd-btn primary full" data-act="look-import"><i class="fa-solid fa-wand-magic-sparkles"></i> Добавить — ИИ разберёт сам</button>
+        <div class="wd-or"><span>или собрать самой</span></div>
+        <div class="wd-actions-row">
+            <button class="wd-btn" data-act="set-new"><i class="fa-solid fa-box-archive"></i> Из шкафа</button>
+            <button class="wd-btn" data-act="look-from-worn"><i class="fa-solid fa-person-dress"></i> Что надето сейчас</button>
+        </div>`);
+}
+
+/** Карточка образа: картинка с версиями, надеть, перерисовать, промт, вещи внутри, правка. */
+function lookModal(id) {
+    const set = settings().sets.find(x => x.id === id);
+    if (!set) return;
+    const its = (set.itemIds || []).map(closetItem).filter(Boolean);
+    const who = lookTarget(set);
+    const on = !!who && lookWornBy(set, who);
+    const busy = !!set.pending && importing.has(set.id);
+    const err = set.err || (set.pending && !busy ? 'разбор прервался' : '');
+    openModal(esc(set.name), `
+        ${bigImgHtml(set, set.cat ? catIcon(set.cat) : '🎽')}
+        ${busy ? '<div class="wd-hint-soft"><i class="fa-solid fa-spinner fa-spin"></i> ИИ ещё разбирает образ на вещи…</div>' : ''}
+        ${err && !busy ? `<div class="wd-hint wd-hint-err" data-act="look-retry" data-id="${esc(set.id)}"><i class="fa-solid fa-rotate-right"></i> Не разобралось: ${esc(err)}. Нажми — разберу снова.</div>` : ''}
+        ${its.length ? `<div class="wd-actions-row">
+            <button class="wd-btn primary" data-act="look-wear" data-id="${esc(set.id)}"><i class="fa-solid fa-shirt"></i> ${on ? 'Надето ✓' : who ? `Надеть на ${esc(shortName(who))}` : 'Надеть на…'}</button>
+            <button class="wd-btn" data-act="look-wear-all" data-id="${esc(set.id)}" title="Снять всю остальную одежду (📌, причёска и макияж останутся)"><i class="fa-solid fa-repeat"></i> Переодеть полностью</button>
+        </div>` : ''}
+        <div class="wd-actions-row">
+            <button class="wd-btn" data-act="set-draw" data-id="${esc(set.id)}"><i class="fa-solid fa-palette"></i> ${set.img ? 'Перерисовать' : 'Нарисовать'} · ${esc(styleShort(settings()))}</button>
+            <label class="wd-btn"><i class="fa-solid fa-camera"></i> Своё фото<input type="file" accept="image/*" data-input="lookfile" data-id="${esc(set.id)}" hidden></label>
+            <button class="wd-btn" data-act="look-copy" data-id="${esc(set.id)}"><i class="fa-solid fa-copy"></i> Промт</button>
+        </div>
+        <div class="wd-sec">В образе · ${its.length} ${plural(its.length, 'вещь', 'вещи', 'вещей')} <button class="wd-link" data-act="set-edit" data-id="${esc(set.id)}">изменить состав</button></div>
+        ${its.length ? `<div class="wd-grid small">${its.map(it => itemCard(it)).join('')}</div>` : `<div class="wd-empty small">${busy ? 'Скоро появятся.' : 'Вещей нет — добавь из шкафа («изменить состав»).'}</div>`}
+        <div class="wd-sec">Об образе</div>
+        <div class="wd-field"><label>Название</label><input type="text" data-f="name" value="${esc(set.name)}"></div>
+        <div class="wd-grid2">
+            <div class="wd-field"><label>Чей</label>${ownerSelect(set.owner)}</div>
+            <div class="wd-field"><label>Раздел</label>${catSelect(set.cat || '', 'data-f="cat"')}</div>
+        </div>
+        <div class="wd-field"><label>Промт образа <small>(по-английски: по нему рисуется, его копирует ⧉)</small></label>
+            <textarea rows="4" data-f="prompt" placeholder="пусто — рисую по списку вещей">${esc(set.prompt || '')}</textarea></div>
+        ${set.src?.text ? `<details class="wd-src"><summary>Исходный промт, который ты вставила</summary><pre class="wd-pre">${esc(set.src.text)}</pre></details>` : ''}
+        <div class="wd-actions-row">
+            <button class="wd-btn primary" data-act="look-save" data-id="${esc(set.id)}"><i class="fa-solid fa-check"></i> Сохранить</button>
+            <button class="wd-btn danger" data-act="set-del" data-id="${esc(set.id)}"><i class="fa-solid fa-trash"></i> Удалить образ</button>
+        </div>`, (box) => { box.dataset.look = set.id; });
+}
+
+/** Стиль картинок — быстро с страницы образов (и вернуть «как было»). */
+function styleModal() {
+    const s = settings();
+    const opts = [...Object.entries(STYLES).map(([k, v]) => [k, v.t, v.d || '']), ['custom', 'Свой промт стиля', 'пишется в ⚙ → Картинки вещей']];
+    const shown = looksIn(looksShown(), ui.lkCat).filter(x => !x.pending && ((x.itemIds || []).length || x.prompt));
+    openModal('Стиль картинок', `
+        <div class="wd-menu">${opts.map(([k, t, d]) => `<button class="wd-menu-item wd-style-opt ${k === s.imgStyle ? 'on' : ''}" data-act="style-pick" data-v="${esc(k)}">
+            ${k === s.imgStyle ? '<i class="fa-solid fa-circle-check"></i>' : '<span class="wd-radio"></span>'}
+            <span class="wd-style-txt"><b>${esc(t)}</b>${d ? `<small>${esc(d)}</small>` : ''}</span></button>`).join('')}</div>
+        <div class="wd-hint-soft">Старые картинки не пропадают: новая встаёт сверху, прежние листаются свайпом по карточке.</div>
+        ${shown.length ? `<button class="wd-btn full" data-act="draw-looks-shown"><i class="fa-solid fa-rotate"></i> Перерисовать показанные образы в этом стиле (${shown.length})</button>` : ''}`);
+}
+
+/** Сохранить надетое как образ (вещи — в шкаф, если их там нет). */
+function saveWornAsSet(who) {
+    const s = settings();
+    const st = charState(who);
+    const toSave = (st?.worn || []).filter(e => !e.pinned);
+    if (!toSave.length) { toast('info', 'На нём ничего нет (кроме закреплённого)', '👗 Гардероб'); return null; }
+    const ids = toSave.map(e => {
+        if (e.itemId && closetItem(e.itemId)) return e.itemId;
+        const it = addToCloset({ name: e.name, slot: e.slot, desc: e.desc, img: e.img, owner: who });
+        e.itemId = it.id;
+        return it.id;
+    });
+    const set = { id: uid(), name: `${shortName(who)} — образ ${s.sets.length + 1}`, owner: who, itemIds: ids, at: Date.now(), ...(sliceNow(who) ? { slice: sliceNow(who) } : {}) };
+    s.sets.unshift(set);
+    saveSettings();
+    return set;
+}
+
+/** Скопировать текст (в модалке <dialog> всё снаружи «инертно», поэтому запасной textarea — внутри плашки). */
+function copyText(text) {
+    const fallback = () => {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;font-size:16px';
+        (document.getElementById('wd-panel') || document.body).append(ta);
+        ta.select();
+        ta.setSelectionRange(0, text.length);
+        let ok = false;
+        try { ok = document.execCommand('copy'); } catch { ok = false; }
+        ta.remove();
+        return ok;
+    };
+    const manual = () => openModal('Промт образа', `<div class="wd-hint-soft">Не дали скопировать автоматически — выдели и скопируй:</div><textarea rows="8" readonly>${esc(text)}</textarea>`);
+    const done = () => toast('success', 'Промт скопирован', '👗 Гардероб', { timeOut: 1600 });
+    try {
+        if (navigator.clipboard?.writeText) {
+            navigator.clipboard.writeText(text).then(done, () => (fallback() ? done() : manual()));
+            return;
+        }
+    } catch { /* старый способ */ }
+    if (fallback()) done(); else manual();
 }
 
 function renderCfg() {
@@ -1001,6 +1530,8 @@ function renderCfg() {
         </div>
         <div class="wd-field"><label>Как персонажей зовут в тексте <small>(Имя карточки = прозвища через запятую)</small></label>
             <textarea rows="3" data-set="aliases">${esc(s.aliases)}</textarea></div>
+        <div class="wd-field"><label>Разделы образов <small>(по одному в строке; «Офис», «Вечернее» и «Спортивное» видны у каждого всегда)</small></label>
+            <textarea rows="4" data-set="cats">${esc(s.cats.join('\n'))}</textarea></div>
         ${imgSettings(s)}
         <div class="wd-actions-row">
             <button class="wd-btn" data-act="check-last"><i class="fa-solid fa-magnifying-glass"></i> Проверить последнее сообщение</button>
@@ -1047,12 +1578,16 @@ function imgSettings(s) {
 function render() {
     const panel = document.getElementById('wd-panel');
     if (!panel || !ui.open) return;
+    if (ui.tab === 'sets') ui.tab = 'looks';
     panel.querySelectorAll('.wd-tab').forEach(b => b.classList.toggle('on', b.dataset.tab === ui.tab));
+    // образы — отдельная страница на весь экран
+    panel.classList.toggle('wd-full', ui.tab === 'looks');
     const body = panel.querySelector('.wd-body');
-    const scroll = body.scrollTop;
+    const scroll = ui.shownTab === ui.tab ? body.scrollTop : 0;
+    ui.shownTab = ui.tab;
     try {
         body.innerHTML = ui.tab === 'closet' ? renderCloset()
-            : ui.tab === 'sets' ? renderSets()
+            : ui.tab === 'looks' ? renderLooks()
                 : ui.tab === 'cfg' ? renderCfg()
                     : renderWorn();
     } catch (e) {
@@ -1115,13 +1650,14 @@ function entryMenu(entryUid) {
 function itemMenu(id) {
     const it = closetItem(id);
     if (!it) return;
+    const looks = settings().sets.filter(x => (x.itemIds || []).includes(it.id));
     openModal(esc(it.name), `
-        <div class="wd-big${drawing.has(it.id) ? ' wd-drawing' : ''}" data-draw-id="${esc(it.id)}">${it.img ? `<img src="${esc(it.img)}" alt="">` : `<span>${slotOf(it.slot).i}</span>`}</div>
+        ${bigImgHtml(it, slotOf(it.slot).i)}
         <div class="wd-actions-row">
-            <button class="wd-btn primary" data-act="item-draw" data-id="${esc(it.id)}"><i class="fa-solid fa-palette"></i> ${it.img ? 'Перерисовать' : 'Нарисовать'}</button>
+            <button class="wd-btn primary" data-act="item-draw" data-id="${esc(it.id)}"><i class="fa-solid fa-palette"></i> ${it.img ? 'Перерисовать' : 'Нарисовать'} · ${esc(styleShort(settings()))}</button>
             <label class="wd-btn"><i class="fa-solid fa-camera"></i> Своё фото<input type="file" accept="image/*" data-input="itemfile" data-id="${esc(it.id)}" hidden></label>
-            ${it.img ? `<button class="wd-btn" data-act="item-noimg" data-id="${esc(it.id)}"><i class="fa-solid fa-image"></i> Убрать</button>` : ''}
         </div>
+        ${looks.length ? `<div class="wd-sec">В образах</div><div class="wd-chips">${looks.map(x => `<button class="wd-chip" data-act="look-open" data-id="${esc(x.id)}">${x.cat ? catIcon(x.cat) : '🎽'} ${esc(cut(x.name, 30))}</button>`).join('')}</div>` : ''}
         <div class="wd-sec">Надеть на</div>
         ${personPicker('item-wear', `data-id="${esc(it.id)}"`)}
         <div class="wd-sec">Изменить</div>
@@ -1159,6 +1695,7 @@ function readForm(box) {
 function newItemModal({ wearOn = '' } = {}) {
     ui.draft = { dataUrl: '', img: '', items: [], wearOn };
     openModal('Новая вещь или образ', `
+        <div class="wd-hint" data-act="to-look-add"><i class="fa-solid fa-layer-group"></i> Целый образ (фото или готовый промт)? Добавь его в «Образы» — ИИ сам разложит на вещи, положит их в шкаф и соберёт образ.</div>
         <div class="wd-field"><label>Опиши вещь или вставь промпт образа</label>
             <textarea rows="4" data-input="ntext" placeholder="например: oversized grey hoodie, black leggings, white sneakers — или «чёрное шерстяное пальто до колена»"></textarea></div>
         <div class="wd-photo">
@@ -1223,43 +1760,24 @@ function pickClosetModal() {
            <button class="wd-btn primary full" data-act="new-item"><i class="fa-solid fa-plus"></i> Добавить вещь</button>`);
 }
 
-function setCover(set) {
-    const first = set.itemIds.map(closetItem).find(it => it?.img);
-    const img = set.img || first?.img;
-    return `<div class="wd-setpick-img">${img ? `<img src="${esc(img)}" alt="" loading="lazy">` : '🎽'}</div>`;
-}
-
-function setSlotsText(set) {
-    const ks = [...new Set(set.itemIds.map(closetItem).filter(Boolean).map(it => normSlot(it.slot)))];
-    return ks.map(k => slotOf(k).i).join(' ');
-}
-
-function pickSetModal() {
-    const sets = settings().sets.filter(inEra);
-    const who = ui.who;
-    const mine = sets.filter(x => !x.owner || x.owner === who);
-    const rest = sets.filter(x => x.owner && x.owner !== who);
-    openModal(`Комплекты → ${esc(shortName(who))}`, sets.length ? `
-        <div class="wd-hint-soft">Отметь один или несколько — например, бельё + основной. Заменятся только вещи тех же типов, а закреплённое 📌 останется.</div>
-        <div class="wd-setpick">${[...mine, ...rest].map(set => `
-            <button class="wd-setpick-item" data-act="setpick-toggle" data-id="${esc(set.id)}">
-                ${setCover(set)}
-                <div class="wd-setpick-txt"><div class="wd-set-name">${esc(set.name)}</div><div class="wd-row-meta">${set.itemIds.length} ${plural(set.itemIds.length, 'вещь', 'вещи', 'вещей')} · ${setSlotsText(set)}</div></div>
-                <span class="wd-tick"></span>
-            </button>`).join('')}</div>
-        <label class="wd-switch"><input type="checkbox" data-input="setall"><span></span>Переодеть полностью — снять всю остальную одежду (📌, причёска и макияж останутся)</label>
-        <button class="wd-btn primary full" data-act="sets-apply" data-name="${esc(who)}"><i class="fa-solid fa-shirt"></i> Надеть выбранные</button>`
-        : `<div class="wd-empty"><div class="wd-empty-ico">🎽</div>Комплектов ещё нет.</div>`);
-}
-
-function setBuilderModal(set = null) {
+/** Собрать образ из вещей шкафа (или поменять состав). */
+function setBuilderModal(set = null, { owner, cat } = {}) {
     const chosen = new Set(set?.itemIds || []);
-    openModal(set ? 'Комплект' : 'Новый комплект', `
+    const who = set ? set.owner : (owner ?? (ui.tab === 'looks' && ui.lkWho !== '*' ? ui.lkWho : ui.who || ''));
+    const c = set ? set.cat || '' : (cat ?? (ui.tab === 'looks' && !['all', 'new', 'none'].includes(ui.lkCat) ? ui.lkCat : ''));
+    const items = settings().items.filter(inEra);
+    // сначала вещи этого персонажа и общие, потом чужие
+    const mine = items.filter(it => !it.owner || !who || it.owner === who || chosen.has(it.id));
+    const rest = items.filter(it => !mine.includes(it));
+    openModal(set ? 'Состав образа' : 'Новый образ из шкафа', `
         <div class="wd-field"><label>Название</label><input type="text" data-input="setname" value="${esc(set?.name || '')}" placeholder="например: Хеди — дома, уютное"></div>
-        <div class="wd-field"><label>Чей</label>${ownerSelect(set?.owner || '', 'data-input="setowner"')}</div>
+        <div class="wd-grid2">
+            <div class="wd-field"><label>Чей</label>${ownerSelect(who || '', 'data-input="setowner"')}</div>
+            <div class="wd-field"><label>Раздел</label>${catSelect(c, 'data-input="setcat"')}</div>
+        </div>
         <div class="wd-sec">Вещи <small>(тапай, чтобы выбрать)</small></div>
-        <div class="wd-grid small">${settings().items.filter(inEra).map(it => `<button class="wd-card ${chosen.has(it.id) ? 'on' : ''}" data-act="set-toggle" data-id="${esc(it.id)}">${thumb(it, 'wd-card-img')}<div class="wd-card-name">${esc(it.name)}</div></button>`).join('')}</div>
-        <button class="wd-btn primary full" data-act="set-save" ${set ? `data-id="${esc(set.id)}"` : ''}><i class="fa-solid fa-check"></i> Сохранить комплект</button>`);
+        <div class="wd-grid small">${[...mine, ...rest].map(it => `<button class="wd-card ${chosen.has(it.id) ? 'on' : ''}" data-act="set-toggle" data-id="${esc(it.id)}">${thumb(it, 'wd-card-img')}<div class="wd-card-name">${esc(it.name)}</div></button>`).join('')}</div>
+        <button class="wd-btn primary full" data-act="set-save" ${set ? `data-id="${esc(set.id)}"` : ''}><i class="fa-solid fa-check"></i> Сохранить образ</button>`);
 }
 
 // ───── обработчики ─────
@@ -1276,7 +1794,12 @@ async function onClick(ev) {
 
     switch (act) {
         case 'close': closePanel('кнопка ✕'); break;
-        case 'tab': ui.tab = el.dataset.tab; closeModal(); render(); break;
+        case 'tab': {
+            const t = el.dataset.tab === 'sets' ? 'looks' : el.dataset.tab;
+            if (t === 'looks' && ui.tab !== 'looks') { ui.prevTab = ui.tab; ui.lkWho = ui.who || ui.lkWho; }
+            ui.tab = t;
+            closeModal(); render(); break;
+        }
         case 'who': ui.who = name; render(); break;
         case 'modal-close': closeModal(); break;
 
@@ -1321,18 +1844,8 @@ async function onClick(ev) {
         case 'wipe-who': { const st = charState(ui.who); st.worn = []; st.off = []; closeModal(); commit(); break; }
         case 'remove-person': { const w = chatState(); w.extra = w.extra.filter(x => x !== ui.who); delete w.chars[ui.who]; ui.who = ''; closeModal(); commit(); break; }
         case 'save-as-set': {
-            const st = charState(ui.who);
-            const toSave = st.worn.filter(e => !e.pinned);
-            if (!toSave.length) { window.toastr?.info('На нём ничего нет (кроме закреплённого)', '👗 Гардероб'); break; }
-            const ids = toSave.map(e => {
-                if (e.itemId && closetItem(e.itemId)) return e.itemId;
-                const it = addToCloset({ name: e.name, slot: e.slot, desc: e.desc, img: e.img, owner: ui.who });
-                e.itemId = it.id;
-                return it.id;
-            });
-            const set = { id: uid(), name: `${shortName(ui.who)} — образ ${s.sets.length + 1}`, owner: ui.who, itemIds: ids, ...(sliceNow(ui.who) ? { slice: sliceNow(ui.who) } : {}) };
-            s.sets.unshift(set);
-            saveSettings();
+            const set = saveWornAsSet(ui.who);
+            if (!set) break;
             closeModal();
             commit({ manual: false });
             setBuilderModal(set);
@@ -1342,7 +1855,7 @@ async function onClick(ev) {
             const w = chatState();
             const n = w ? dedupeChars(w.chars, s.items, castNames(), parseAliases(s.aliases)) : 0;
             closeModal(); commit();
-            window.toastr?.info(n ? `Склеила дублей: ${n}` : 'Дублей не нашла', '👗 Гардероб', { timeOut: 2500 });
+            toast('info', n ? `Склеила дублей: ${n}` : 'Дублей не нашла', '👗 Гардероб', { timeOut: 2500 });
             break;
         }
         case 'clear-off': { charState(ui.who).off = []; commit(); break; }
@@ -1379,7 +1892,7 @@ async function onClick(ev) {
             const f = findEntry(ui.who, euid);
             if (f) { const it = addToCloset({ ...f.e, owner: ui.who }); f.e.itemId = it.id; }
             closeModal(); commit({ manual: false });
-            window.toastr?.success('В шкафу', '👗 Гардероб', { timeOut: 1500 });
+            toast('success', 'В шкафу', '👗 Гардероб', { timeOut: 1500 });
             break;
         }
         case 'entry-give': {
@@ -1399,15 +1912,13 @@ async function onClick(ev) {
             commit();
             break;
         }
-        case 'pick-set': pickSetModal(); break;
-        case 'setpick-toggle': el.classList.toggle('on'); break;
-        case 'sets-apply': {
-            const chosen = [...box.querySelectorAll('.wd-setpick-item.on')].map(x => s.sets.find(set => set.id === x.dataset.id)).filter(Boolean);
-            if (!chosen.length) { window.toastr?.info('Отметь хотя бы один комплект', '👗 Гардероб', { timeOut: 2000 }); break; }
-            applySets(name || ui.who, chosen, { replaceAll: !!box.querySelector('[data-input="setall"]')?.checked });
-            ui.who = name || ui.who;
-            ui.tab = 'worn';
-            closeModal(); commit(); break;
+        case 'pick-set': {
+            // «Образы» на «На них» — коллекция этого персонажа на весь экран
+            ui.prevTab = ui.tab === 'looks' ? 'worn' : ui.tab;
+            ui.lkWho = ui.who || '*';
+            ui.lkCat = 'all';
+            ui.tab = 'looks';
+            closeModal(); render(); break;
         }
         case 'entry-pin': {
             const f = findEntry(ui.who, euid);
@@ -1415,10 +1926,14 @@ async function onClick(ev) {
             closeModal(); commit(); break;
         }
         case 'set-apply': {
-            applySets(name || ui.who, [s.sets.find(x => x.id === id)]);
+            const set = s.sets.find(x => x.id === id);
+            if (!set || !chatState()) break;
+            applySets(name || ui.who, [set], { replaceAll: el.dataset.all === '1' });
             ui.who = name || ui.who;
-            ui.tab = 'worn';
-            closeModal(); commit(); break;
+            if (ui.tab !== 'looks') ui.tab = 'worn';
+            closeModal(); commit();
+            toast('success', `${esc(set.name)} → ${esc(shortName(name || ui.who))}`, '👗 Надето', { timeOut: 1800 });
+            break;
         }
 
         case 'slot': ui.slot = el.dataset.slot; render(); break;
@@ -1429,7 +1944,7 @@ async function onClick(ev) {
             wearItem(name, closetItem(id));
             ui.who = name;
             closeModal(); commit();
-            window.toastr?.success(`Надето: ${esc(shortName(name))}`, '👗 Гардероб', { timeOut: 1500 });
+            toast('success', `Надето: ${esc(shortName(name))}`, '👗 Гардероб', { timeOut: 1500 });
             break;
         }
         case 'item-save': {
@@ -1453,14 +1968,14 @@ async function onClick(ev) {
         case 'n-analyze': {
             const d = ui.draft;
             const text = box.querySelector('[data-input="ntext"]').value.trim();
-            if (!text && !d?.dataUrl) { window.toastr?.info('Напиши что-нибудь или добавь фото', '👗 Гардероб'); break; }
+            if (!text && !d?.dataUrl) { toast('info', 'Напиши что-нибудь или добавь фото', '👗 Гардероб'); break; }
             el.disabled = true;
             el.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Разбираю…';
             try {
                 d.items = (await analyzeOutfit({ text, dataUrl: d.dataUrl })).map(x => ({ ...x, on: true }));
                 renderProposed(box);
             } catch (e) {
-                window.toastr?.warning(String(e.message || e), '👗 Гардероб', { timeOut: 6000 });
+                toast('warning', String(e.message || e), '👗 Гардероб', { timeOut: 6000 });
             } finally {
                 el.disabled = false;
                 el.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> Разложить на вещи (ИИ)';
@@ -1470,7 +1985,7 @@ async function onClick(ev) {
         case 'n-plain': {
             const d = ui.draft;
             const text = box.querySelector('[data-input="ntext"]').value.trim();
-            if (!text) { window.toastr?.info('Напиши название вещи', '👗 Гардероб'); break; }
+            if (!text) { toast('info', 'Напиши название вещи', '👗 Гардероб'); break; }
             const owner = box.querySelector('[data-input="nowner"]').value;
             const it = addToCloset({ name: text, slot: box.querySelector('[data-input="nslot"]').value, img: d?.img || '', owner });
             if (d?.wearOn) wearItem(d.wearOn, it);
@@ -1496,25 +2011,33 @@ async function onClick(ev) {
                 ui.tab = 'worn';
             }
             closeModal(); commit({ manual: !!el.dataset.wear });
-            window.toastr?.success(`${created.length} в шкафу${drawJobs.length ? ' — рисую картинки' : ''}`, '👗 Гардероб', { timeOut: 2000 });
+            toast('success', `${created.length} в шкафу${drawJobs.length ? ' — рисую картинки' : ''}`, '👗 Гардероб', { timeOut: 2000 });
             if (drawJobs.length) queueDraw(drawJobs);
             break;
         }
 
         case 'item-draw': {
             const conn = imgConnection();
-            if (conn.error) { window.toastr?.warning(esc(conn.error), '👗 Гардероб', { timeOut: 7000 }); break; }
+            if (conn.error) { toast('warning', esc(conn.error), '👗 Гардероб', { timeOut: 7000 }); break; }
             queueDraw([{ id }]);
             break;
         }
-        case 'item-noimg': {
-            const it = closetItem(id);
-            if (it) { it.img = ''; saveSettings(); }
-            closeModal(); render(); break;
+        case 'img-step': stepImage(id, Number(el.dataset.dir) || 1); break;
+        case 'img-drop': {
+            const obj = imgOwner(id);
+            if (!obj) break;
+            dropImg(obj);
+            if (closetItem(id)) syncItemImg(obj);
+            saveSettings();
+            const big = box?.querySelector(`[data-draw-id="${CSS.escape(id)}"]`);
+            if (big) big.innerHTML = obj.img ? `<img src="${esc(obj.img)}" alt="">` : `<span>${closetItem(id) ? slotOf(obj.slot).i : '🎽'}</span>`;
+            paintGallery();
+            render();
+            break;
         }
         case 'draw-missing': {
             const conn = imgConnection();
-            if (conn.error) { window.toastr?.warning(esc(conn.error), '👗 Гардероб', { timeOut: 7000 }); break; }
+            if (conn.error) { toast('warning', esc(conn.error), '👗 Гардероб', { timeOut: 7000 }); break; }
             const ids = s.items.filter(it => !it.img).map(it => it.id);
             if (!ids.length) break;
             if (!confirm(`Нарисовать ${ids.length} ${plural(ids.length, 'картинку', 'картинки', 'картинок')} через ${conn.apiType} (${conn.model})? Каждая — отдельный платный запрос.`)) break;
@@ -1524,7 +2047,7 @@ async function onClick(ev) {
         }
         case 'draw-shown': {
             const conn = imgConnection();
-            if (conn.error) { window.toastr?.warning(esc(conn.error), '👗 Гардероб', { timeOut: 7000 }); break; }
+            if (conn.error) { toast('warning', esc(conn.error), '👗 Гардероб', { timeOut: 7000 }); break; }
             const ids = filteredItems().map(it => it.id);
             if (!ids.length) break;
             if (!confirm(`Перерисовать ${ids.length} ${plural(ids.length, 'картинку', 'картинки', 'картинок')} через ${conn.apiType} (${conn.model})? Старые картинки заменятся. Каждая — отдельный платный запрос.`)) break;
@@ -1532,11 +2055,12 @@ async function onClick(ev) {
             render();
             break;
         }
-        case 'draw-stop': { drawStop = true; drawQ.length = 0; window.toastr?.info('Дорисую текущую и остановлюсь', '👗 Гардероб', { timeOut: 2500 }); break; }
+        case 'draw-stop': { drawStop = true; drawQ.length = 0; toast('info', 'Дорисую текущую и остановлюсь', '👗 Гардероб', { timeOut: 2500 }); break; }
         case 'set-draw': {
             const conn = imgConnection();
-            if (conn.error) { window.toastr?.warning(esc(conn.error), '👗 Гардероб', { timeOut: 7000 }); break; }
-            closeModal();
+            if (conn.error) { toast('warning', esc(conn.error), '👗 Гардероб', { timeOut: 7000 }); break; }
+            // из карточки образа модалку не закрываем: спиннер крутится прямо на большой картинке
+            if (!box?.dataset.look) closeModal();
             queueDraw([{ kind: 'set', id }]);
             render();
             break;
@@ -1546,35 +2070,182 @@ async function onClick(ev) {
         case 'set-toggle': el.classList.toggle('on'); break;
         case 'set-save': {
             const ids = [...box.querySelectorAll('.wd-card.on')].map(x => x.dataset.id);
-            const nm = box.querySelector('[data-input="setname"]').value.trim() || `Комплект ${s.sets.length + 1}`;
+            const nm = box.querySelector('[data-input="setname"]').value.trim() || `Образ ${s.sets.length + 1}`;
             const owner = box.querySelector('[data-input="setowner"]').value;
+            const cat = readCat(box, 'data-input="setcat"');
             const old = id ? s.sets.find(x => x.id === id) : null;
             const sl = sliceNow(owner);
-            if (old) { if (owner !== old.owner) { if (sl) old.slice = sl; else delete old.slice; } Object.assign(old, { name: nm, owner, itemIds: ids }); }
-            else s.sets.unshift({ id: uid(), name: nm, owner, itemIds: ids, ...(sl ? { slice: sl } : {}) });
-            saveSettings(); closeModal(); render(); break;
-        }
-        case 'set-menu': {
-            const set = s.sets.find(x => x.id === id);
-            if (!set) break;
-            openModal(esc(set.name), menuList([
-                ['set-edit', 'fa-pen', 'Изменить', `data-id="${esc(id)}"`],
-                ['set-draw', 'fa-palette', set.img ? 'Перерисовать обложку' : 'Нарисовать обложку', `data-id="${esc(id)}"`],
-                ['set-del', 'fa-trash', 'Удалить комплект', `data-id="${esc(id)}"`, true],
-            ]));
-            break;
+            if (old) {
+                if (owner !== old.owner) { if (sl) old.slice = sl; else delete old.slice; }
+                Object.assign(old, { name: nm, owner, itemIds: ids, cat });
+                if (nm) old.named = true;
+            } else s.sets.unshift({ id: uid(), name: nm, owner, itemIds: ids, cat, at: Date.now(), named: true, ...(sl ? { slice: sl } : {}) });
+            saveSettings();
+            if (old && ui.tab === 'looks') { lookModal(old.id); render(); break; }
+            closeModal(); render(); break;
         }
         case 'set-edit': setBuilderModal(s.sets.find(x => x.id === id)); break;
-        case 'set-del': { s.sets = s.sets.filter(x => x.id !== id); saveSettings(); closeModal(); render(); break; }
-        case 'set-wear': {
-            openModal('Надеть комплект на', personPicker('set-apply', `data-id="${esc(id)}"`));
+        case 'set-del': {
+            if (!confirm('Удалить образ? Вещи останутся в шкафу.')) break;
+            s.sets = s.sets.filter(x => x.id !== id);
+            saveSettings(); closeModal(); render(); break;
+        }
+
+        // ───── коллекция образов ─────
+        case 'look-back': { ui.tab = ui.prevTab && ui.prevTab !== 'looks' ? ui.prevTab : 'worn'; closeModal(); render(); break; }
+        case 'look-who': {
+            ui.lkWho = name || '*';
+            if (name && name !== '*') ui.who = name;
+            render(); break;
+        }
+        case 'look-cat': {
+            const c = el.dataset.cat || 'all';
+            ui.lkCat = ui.lkCat === c && c !== 'all' ? 'all' : c;
+            render();
+            document.querySelector('#wd-panel .wd-body')?.scrollTo?.({ top: 0 });
+            break;
+        }
+        case 'look-add': lookAddModal(); break;
+        case 'to-look-add': {
+            const owner = box?.querySelector('[data-input="nowner"]')?.value || '';
+            if (ui.tab !== 'looks') ui.prevTab = ui.tab;
+            ui.tab = 'looks';
+            if (owner) ui.lkWho = owner; else if (!ui.lkWho) ui.lkWho = ui.who || '';
+            closeModal(); render();
+            lookAddModal(owner ? { owner } : {});
+            break;
+        }
+        case 'look-open': {
+            if (Date.now() - swipedAt < 400) break; // это был свайп по картинке, а не тап
+            lookModal(id); break;
+        }
+        case 'look-retry': runImport(id); break;
+        case 'look-from-worn': {
+            const who = box?.querySelector('[data-input="lkowner"]')?.value || (ui.lkWho !== '*' ? ui.lkWho : '') || ui.who;
+            if (!who) { toast('info', 'Выбери, чей образ', '👗 Гардероб'); break; }
+            const set = saveWornAsSet(who);
+            if (!set) break;
+            ui.lkWho = who;
+            commit({ manual: false });
+            setBuilderModal(set);
+            break;
+        }
+        case 'look-wear':
+        case 'look-wear-all': {
+            const set = s.sets.find(x => x.id === id);
+            if (!set) break;
+            if (!chatState()) { toast('info', 'Открой чат — тогда будет на кого надеть', '👗 Гардероб'); break; }
+            if (!(set.itemIds || []).length) { toast('info', 'В образе пока нет вещей', '👗 Гардероб'); break; }
+            const who = lookTarget(set);
+            const all = act === 'look-wear-all';
+            if (!who) { openModal('Надеть образ на', personPicker('set-apply', `data-id="${esc(id)}" data-all="${all ? 1 : 0}"`)); break; }
+            applySets(who, [set], { replaceAll: all });
+            ui.who = who;
+            commit();
+            if (box?.dataset.look) lookModal(id);
+            toast('success', `${esc(set.name)} → ${esc(shortName(who))}${all ? ' (остальное снято)' : ''}`, '👗 Надето', { timeOut: 1800 });
+            break;
+        }
+        case 'look-copy': {
+            const set = s.sets.find(x => x.id === id);
+            if (set) copyText(box?.dataset.look === id ? (box.querySelector('[data-f="prompt"]')?.value.trim() || lookPromptText(set)) : lookPromptText(set));
+            break;
+        }
+        case 'look-save': {
+            const set = s.sets.find(x => x.id === id);
+            if (!set || !box) break;
+            const f = readForm(box);
+            const owner = f.owner;
+            if (owner !== set.owner) { const sl = sliceNow(owner); if (sl) set.slice = sl; else delete set.slice; }
+            Object.assign(set, {
+                name: f.name || set.name,
+                owner,
+                cat: readCat(box, 'data-f="cat"'),
+                prompt: String(box.querySelector('[data-f="prompt"]')?.value || '').trim(),
+            });
+            set.named = true;
+            saveSettings(); closeModal(); render();
+            toast('success', 'Сохранено', '👗 Гардероб', { timeOut: 1200 });
+            break;
+        }
+        case 'look-import': {
+            const d = ui.draft;
+            if (!d || !box) break;
+            const text = box.querySelector('[data-input="lktext"]').value.trim();
+            if (d.uploading) { toast('info', 'Фото ещё загружается — секунду', '👗 Гардероб', { timeOut: 2000 }); break; }
+            if (!text && !d.img) { toast('info', 'Добавь фото образа или вставь промт', '👗 Гардероб', { timeOut: 2500 }); break; }
+            if (!(s.visionProfile || s.watcherProfile)) { toast('warning', 'Сначала выбери в ⚙ профиль для фото — он разбирает образы', '👗 Гардероб', { timeOut: 5000 }); break; }
+            const owner = box.querySelector('[data-input="lkowner"]').value;
+            const cat = readCat(box, 'data-input="lkcat"');
+            const nm = box.querySelector('[data-input="lkname"]').value.trim();
+            const drawCover = !!box.querySelector('[data-input="lkcover"]')?.checked;
+            const drawItems = !!box.querySelector('[data-input="lkitems"]')?.checked;
+            const hair = !!box.querySelector('[data-input="lkhair"]')?.checked;
+            Object.assign(s, { lkDrawCover: drawCover, lkDrawItems: drawItems, lkHair: hair });
+            const sl = sliceNow(owner);
+            const set = {
+                id: uid(),
+                name: nm || (text && !d.img ? cut(text.replace(/\s+/g, ' '), 40) : 'Новый образ'),
+                owner,
+                itemIds: [],
+                cat,
+                at: Date.now(),
+                pending: true,
+                src: { ...(d.img ? { img: d.img } : {}), ...(text ? { text } : {}), ...(hair ? { look: true } : {}) },
+                ...(nm ? { named: true } : {}),
+                ...(sl ? { slice: sl } : {}),
+            };
+            if (d.img) pushImg(set, d.img);
+            s.sets.unshift(set);
+            saveSettings();
+            const dataUrl = d.dataUrl;
+            closeModal();
+            if (owner) ui.lkWho = owner;
+            if (!['all', 'new'].includes(ui.lkCat) && (!cat || catKey(cat) !== catKey(ui.lkCat))) ui.lkCat = 'all';
+            render();
+            document.querySelector('#wd-panel .wd-body')?.scrollTo?.({ top: 0 });
+            runImport(set.id, { dataUrl, drawCover, drawItems });
+            break;
+        }
+        case 'look-style': styleModal(); break;
+        case 'style-pick': {
+            s.imgStyle = el.dataset.v || 'oil';
+            saveSettings();
+            closeModal();
+            render();
+            toast('info', `Стиль картинок: ${esc(styleShort(s))}. Новые картинки — в нём, старые листаются свайпом.`, '👗 Гардероб', { timeOut: 3000 });
+            break;
+        }
+        case 'draw-looks-shown': {
+            const conn = imgConnection();
+            if (conn.error) { toast('warning', esc(conn.error), '👗 Гардероб', { timeOut: 7000 }); break; }
+            const list = looksIn(looksShown(), ui.lkCat).filter(x => !x.pending && ((x.itemIds || []).length || x.prompt));
+            if (!list.length) break;
+            if (!confirm(`Перерисовать ${list.length} ${plural(list.length, 'образ', 'образа', 'образов')} в стиле «${styleShort(s)}» через ${conn.apiType} (${conn.model})? Каждый — отдельный платный запрос. Старые картинки останутся версиями.`)) break;
+            closeModal();
+            queueDraw(list.map(x => ({ kind: 'set', id: x.id })));
+            render();
+            break;
+        }
+        case 'look-autocat': {
+            const list = looksIn(looksShown(), 'none').filter(x => !x.pending && !x.err);
+            if (!list.length) break;
+            el.disabled = true;
+            el.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Раскладываю…';
+            try {
+                const n = await autoCategorize(list);
+                toast('success', n ? `Разложила по разделам: ${n}` : 'Модель не поняла — попробуй ещё раз', '👗 Гардероб', { timeOut: 2500 });
+            } catch (e) {
+                toast('warning', esc(String(e?.message || e)), '👗 Гардероб', { timeOut: 6000 });
+            }
+            render();
             break;
         }
 
         case 'check-last': {
             const chat = ctx().chat || [];
             if (!chat.length) break;
-            window.toastr?.info('Смотрю последнее сообщение…', '👗 Гардероб', { timeOut: 1500 });
+            toast('info', 'Смотрю последнее сообщение…', '👗 Гардероб', { timeOut: 1500 });
             enqueue(chat.length - 1, { force: true });
             break;
         }
@@ -1585,6 +2256,22 @@ async function onInput(ev) {
     const el = ev.target;
     if (!document.getElementById('wd-panel')?.contains(el)) return;
     const s = settings();
+    // «＋ свой раздел…» в выборе раздела — показать поле для названия
+    if (el.tagName === 'SELECT' && el.value === '__new' && ev.type === 'change') {
+        const field = el.closest('.wd-field');
+        if (field && !field.querySelector('[data-input="catnew"]')) {
+            field.insertAdjacentHTML('beforeend', '<input type="text" data-input="catnew" placeholder="название раздела, например «Свадьба»" maxlength="40">');
+            field.querySelector('[data-input="catnew"]')?.focus();
+        }
+        return;
+    }
+    if (el.dataset.set === 'cats') {
+        // разделы образов: по одному в строке (или через запятую); пустой список — вернуть стандартные
+        const list = catList(el.value);
+        s.cats = list.length ? list : [...DEFAULT_CATS];
+        saveSettings();
+        return;
+    }
     if (el.dataset.set) {
         const k = el.dataset.set;
         s[k] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Math.max(0, parseInt(el.value) || 0) : el.value;
@@ -1623,11 +2310,55 @@ async function onInput(ev) {
             saveSettings();
             if (big) big.innerHTML = `<img src="${esc(path)}" alt="">`;
             render();
-            window.toastr?.success(`Лицо ${esc(shortName(who))} сохранено`, '👗 Гардероб', { timeOut: 2000 });
+            toast('success', `Лицо ${esc(shortName(who))} сохранено`, '👗 Гардероб', { timeOut: 2000 });
         } catch (e) {
-            window.toastr?.warning(esc(String(e.message || e)), '👗 Гардероб');
+            toast('warning', esc(String(e.message || e)), '👗 Гардероб');
         } finally {
             big?.classList.remove('wd-drawing');
+        }
+        return;
+    }
+    if (el.dataset.input === 'lkfile' && ev.type === 'change') {
+        // фото образа для импорта: превью сразу, на сервер — в фоне; ИИ получит уменьшенную копию
+        const file = el.files?.[0];
+        const d = ui.draft;
+        if (!file || d?.kind !== 'look') return;
+        const drop = el.closest('.wd-lk-drop');
+        const prev = drop?.querySelector('.wd-lk-drop-prev');
+        d.uploading = true;
+        drop?.classList.add('has', 'wd-drawing');
+        try {
+            const big = await fileToDataUrl(file, 1400, 0.88);
+            if (prev) prev.innerHTML = `<img src="${big}" alt="">`;
+            d.dataUrl = await fileToDataUrl(file, 1024, 0.85);
+            d.img = await uploadImage(big);
+        } catch (e) {
+            d.img = '';
+            d.dataUrl = '';
+            if (prev) prev.innerHTML = '';
+            drop?.classList.remove('has');
+            toast('warning', esc(String(e.message || e)), '👗 Гардероб');
+        } finally {
+            d.uploading = false;
+            drop?.classList.remove('wd-drawing');
+        }
+        return;
+    }
+    if (el.dataset.input === 'lookfile' && ev.type === 'change') {
+        // своё фото обложкой образа (прежние картинки остаются версиями)
+        const file = el.files?.[0];
+        const set = settings().sets.find(x => x.id === el.dataset.id);
+        if (!file || !set) return;
+        drawing.add(set.id);
+        paintDrawing();
+        try {
+            pushImg(set, await uploadImage(await fileToDataUrl(file, 1400, 0.88)));
+            saveSettings();
+        } catch (e) {
+            toast('warning', esc(String(e.message || e)), '👗 Гардероб');
+        } finally {
+            drawing.delete(set.id);
+            paintDrawing();
         }
         return;
     }
@@ -1638,11 +2369,12 @@ async function onInput(ev) {
         drawing.add(it.id);
         paintDrawing();
         try {
-            it.img = await uploadImage(await fileToDataUrl(file, 1024));
+            pushImg(it, await uploadImage(await fileToDataUrl(file, 1024)));
             it.drawn = false;
+            syncItemImg(it);
             saveSettings();
         } catch (e) {
-            window.toastr?.warning(esc(String(e.message || e)), '👗 Гардероб');
+            toast('warning', esc(String(e.message || e)), '👗 Гардероб');
         } finally {
             drawing.delete(it.id);
             paintDrawing();
@@ -1663,7 +2395,7 @@ async function onInput(ev) {
             ui.draft.img = await uploadImage(dataUrl);
         } catch (e) {
             prev.innerHTML = '';
-            window.toastr?.warning(String(e.message || e), '👗 Гардероб');
+            toast('warning', String(e.message || e), '👗 Гардероб');
         }
     }
 }
@@ -1690,7 +2422,7 @@ function buildPanel() {
         <div class="wd-tabs">
             <button class="wd-tab" data-act="tab" data-tab="worn"><i class="fa-solid fa-person-dress"></i><span>На них</span></button>
             <button class="wd-tab" data-act="tab" data-tab="closet"><i class="fa-solid fa-box-archive"></i><span>Шкаф</span></button>
-            <button class="wd-tab" data-act="tab" data-tab="sets"><i class="fa-solid fa-layer-group"></i><span>Комплекты</span></button>
+            <button class="wd-tab" data-act="tab" data-tab="looks"><i class="fa-solid fa-layer-group"></i><span>Образы</span></button>
             <button class="wd-tab" data-act="tab" data-tab="cfg"><i class="fa-solid fa-gear"></i></button>
         </div>
         <div class="wd-body"></div>
@@ -1706,6 +2438,21 @@ function buildPanel() {
     panel.addEventListener('input', onInput);
     panel.addEventListener('change', onInput);
 
+    // свайп влево/вправо по картинке образа — листать её версии (масло ↔ карандаш ↔ исходное фото)
+    let sw = null;
+    panel.addEventListener('touchstart', e => {
+        const el = e.target.closest?.('.wd-lk-img[data-gal]');
+        sw = el && Number(el.dataset.gal) > 1 && e.touches.length === 1 ? { id: el.dataset.id, x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
+    }, { passive: true });
+    panel.addEventListener('touchend', e => {
+        if (!sw) return;
+        const t = e.changedTouches[0];
+        const dx = t.clientX - sw.x, dy = t.clientY - sw.y;
+        const id = sw.id;
+        sw = null;
+        if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy) * 1.5) { swipedAt = Date.now(); stepImage(id, dx < 0 ? 1 : -1); }
+    }, { passive: true });
+
     // свайп вниз по шапке закрывает плашку (телефон)
     let y0 = null;
     const head = panel.querySelector('.wd-grab');
@@ -1720,6 +2467,7 @@ function buildPanel() {
 }
 
 let openedAt = 0;
+let swipedAt = 0;
 
 /** Один раз на чат после обновления: склеить дубли, которые набежали в старых версиях. */
 function autoDedupeOnce() {
@@ -1731,7 +2479,7 @@ function autoDedupeOnce() {
     saveChat();
     if (n) {
         updateInjection();
-        window.toastr?.info(`Склеила дублей: ${n}`, '👗 Гардероб', { timeOut: 3000 });
+        toast('info', `Склеила дублей: ${n}`, '👗 Гардероб', { timeOut: 3000 });
     }
 }
 
@@ -1740,7 +2488,10 @@ function openPanel(tab) {
     try { autoDedupeOnce(); } catch (e) { console.warn('[Гардероб] склейка', e); }
     try {
         buildPanel();
+        if (tab === 'sets') tab = 'looks'; // Life и старые кнопки зовут «sets»
+        if (tab === 'looks' && ui.tab !== 'looks') ui.prevTab = ui.tab || 'worn';
         if (tab) ui.tab = tab;
+        if (ui.tab === 'looks' && !ui.lkWho) ui.lkWho = ui.who || '';
         ui.open = true;
         render();
         const dlg = document.getElementById('wd-dialog');
@@ -1749,7 +2500,7 @@ function openPanel(tab) {
         }
     } catch (e) {
         console.error('[Гардероб] open', e);
-        window.toastr?.error(esc(String(e?.message || e)), '👗 Гардероб: ошибка', { timeOut: 15000 });
+        toast('error', esc(String(e?.message || e)), '👗 Гардероб: ошибка', { timeOut: 15000 });
     }
     // двойной кадр: iOS иначе пропускает анимацию и плашка остаётся за экраном
     requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -1793,7 +2544,7 @@ function diagnoseOpen() {
             `rect: top ${Math.round(r.top)} h ${Math.round(r.height)} / окно ${window.innerHeight}`,
             ...events.slice(0, 6),
         ].join('<br>');
-        window.toastr?.warning(esc(msg).replace(/&lt;br&gt;/g, '<br>'), `👗 Гардероб ${VERSION}: диагностика`, { timeOut: 0, extendedTimeOut: 0, closeButton: true, escapeHtml: false });
+        toast('warning', esc(msg).replace(/&lt;br&gt;/g, '<br>'), `👗 Гардероб ${VERSION}: диагностика`, { timeOut: 0, extendedTimeOut: 0, closeButton: true, escapeHtml: false });
     }, 1500);
 }
 
@@ -1803,6 +2554,7 @@ function closePanel(reason = 'неизвестно') {
     closeReason = `${typeof reason === 'string' ? reason : 'клик'} через ${Date.now() - openedAt} мс`;
     ui.open = false;
     closeModal();
+    document.querySelector('#wd-panel .wd-toasts')?.replaceChildren();
     document.getElementById('wd-backdrop')?.classList.remove('on');
     document.getElementById('wd-panel')?.classList.remove('on');
     const t = openedAt;
@@ -1894,12 +2646,13 @@ function registerSlash() {
         SlashCommandParser.addCommandObject(SlashCommand.fromProps({
             name: 'wardrobe',
             aliases: ['гардероб'],
-            helpString: 'Гардероб: без аргумента — открыть плашку; check — проверить последнее сообщение; on / off — включить или выключить.',
-            unnamedArgumentList: [SlashCommandArgument.fromProps({ description: 'check | on | off', typeList: [ARGUMENT_TYPE.STRING], isRequired: false })],
+            helpString: 'Гардероб: без аргумента — открыть плашку; looks (образы) — коллекция образов на весь экран; check — проверить последнее сообщение; on / off — включить или выключить.',
+            unnamedArgumentList: [SlashCommandArgument.fromProps({ description: 'looks | check | on | off', typeList: [ARGUMENT_TYPE.STRING], isRequired: false })],
             callback: async (_a, value) => {
                 const v = String(value || '').trim().toLowerCase();
                 if (v === 'on' || v === 'off') { settings().enabled = v === 'on'; saveSettings(); updateInjection(); return ''; }
                 if (v === 'check') { const n = (ctx().chat || []).length; if (n) enqueue(n - 1, { force: true }); return ''; }
+                if (['looks', 'образы', 'sets', 'комплекты'].includes(v)) { openPanel('looks'); return ''; }
                 openPanel();
                 return '';
             },
@@ -1919,9 +2672,14 @@ window.Wardrobe = Object.freeze({
         commit();
         return true;
     },
-    open(tab, who) { if (who) ui.who = who; openPanel(tab); },
-    /** Комплекты, которые видно в этом чате (облик эпохи + общие) — для Life. */
-    setsFor(who) { return settings().sets.filter(x => inEra(x) && (!who || !x.owner || x.owner === who)); },
+    /** tab: worn | closet | looks (старое «sets» = looks) | cfg. who — чей гардероб/коллекцию показать. */
+    open(tab, who) { if (who) { ui.who = who; ui.lkWho = who; } openPanel(tab); },
+    /** Коллекция образов на весь экран: чья и какой раздел («Офис», «Вечернее»…). */
+    openLooks(who, cat) { if (who) { ui.who = who; ui.lkWho = who; } if (cat) ui.lkCat = cat; openPanel('looks'); },
+    /** Комплекты (образы), которые видно в этом чате (облик эпохи + общие) — для Life. Неразобранные — не отдаём. */
+    setsFor(who) { return settings().sets.filter(x => !x.pending && inEra(x) && (!who || !x.owner || x.owner === who)); },
+    /** Разделы образов (Офис, Вечернее, Спортивное…). */
+    cats() { return [...settings().cats]; },
     /** Облик владельца в этом чате (ядро «Священный таймлайн»): { identity, slice, label } | null. */
     sliceOf(name) { return people()[name] || null; },
     drawSet(setId) {
@@ -1933,11 +2691,15 @@ window.Wardrobe = Object.freeze({
 });
 
 window.addEventListener('error', (e) => {
-    if (String(e?.filename || '').includes('/wardrobe/')) window.toastr?.error(esc(`${e.message} (${String(e.filename).split('/').pop()}:${e.lineno})`), '👗 Гардероб: ошибка', { timeOut: 15000 });
+    if (String(e?.filename || '').includes('/wardrobe/')) toast('error', esc(`${e.message} (${String(e.filename).split('/').pop()}:${e.lineno})`), '👗 Гардероб: ошибка', { timeOut: 15000 });
 });
 
 jQuery(async () => {
-    settings();
+    const s0 = settings();
+    // разбор образа, прерванный перезагрузкой страницы, — показать «повторить», а не вечный спиннер
+    let stale = 0;
+    for (const set of s0.sets) if (set.pending) { delete set.pending; set.err = 'разбор прервался — нажми, чтобы повторить'; stale++; }
+    if (stale) saveSettings();
     renderSettingsDrawer();
     registerSlash();
     syncFab();

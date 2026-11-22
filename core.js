@@ -479,6 +479,141 @@ export function parseAnalyzed(text) {
         .map(x => ({ name: cut(x.name, 80), slot: normSlot(x.slot), desc: String(x.desc || '').trim() }));
 }
 
+// ───── образы (полные комплекты): разделы, импорт с фото или промта, версии картинок ─────
+
+/** Разделы коллекции образов. Три её — «Офис», «Вечернее», «Спортивное» — видны у каждого персонажа даже пустыми. */
+export const DEFAULT_CATS = ['Повседневное', 'Офис', 'Вечернее', 'Спортивное', 'Дом и сон', 'Бельё', 'Миссия'];
+export const CORE_CATS = ['Офис', 'Вечернее', 'Спортивное'];
+const CAT_HINTS = {
+    'повседневное': 'на каждый день: джинсы, футболки, свитеры, худи, кроссовки, куртки',
+    'офис': 'деловое и рабочее: костюмы, блейзеры, рубашки, брюки, юбки-карандаш, лабораторное',
+    'вечернее': 'выход, ужин, свидание, вечеринка, приём: платья, смокинги, каблуки',
+    'спортивное': 'спорт, бег, зал, йога: спортивные костюмы, леггинсы, топы, спортивные кроссовки',
+    'дом и сон': 'дома и в постели: пижамы, халаты, домашнее, лаунж',
+    'белье': 'бельё, купальники, корсеты',
+    'миссия': 'задание, бой, слежка: тактическое, форма, бронежилет, экипировка, костюм героя',
+};
+
+/** Чистый список разделов: без пустых и повторов. */
+export function catList(cats) {
+    const out = [];
+    for (const c of Array.isArray(cats) ? cats : String(cats || '').split(/[\n,;]+/)) {
+        const t = String(c || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+        if (t && !out.some(x => norm(x) === norm(t))) out.push(t);
+    }
+    return out;
+}
+
+/** «вечерний» → «Вечернее», «sport» → «Спортивное»: раздел из ответа модели → раздел из списка (или ''). */
+export function matchCat(c, cats) {
+    const n = norm(c).replace(/[«»"'.!]/g, '').trim();
+    if (!n) return '';
+    const list = catList(cats);
+    const root = (w) => norm(w).replace(/[«»"'.!]/g, '').split(/\s+/)[0].slice(0, 5);
+    return list.find(x => norm(x) === n)
+        || list.find(x => norm(x).startsWith(n) || n.startsWith(norm(x)))
+        || list.find(x => root(x).length >= 4 && root(n).startsWith(root(x).slice(0, 4)))
+        || [
+            [/sport|gym|athlet|fitness|yoga|спорт|фитнес/, /спорт/i],
+            [/office|work|business|formal|делов|офис|работ/, /офис/i],
+            [/evening|party|gala|cocktail|date|вечер|выход|праздн/, /вечер/i],
+            [/home|sleep|pajama|pyjama|lounge|night|дом|пижам|сон/, /дом|сон|пижам/i],
+            [/linger|underw|swim|бель|купальн/, /бель/i],
+            [/mission|combat|tactic|uniform|battle|мисси|бо[ей]|тактич|форм/, /мисси|бо[ей]/i],
+            [/casual|everyday|street|daily|повсед|кэжуал|каждый/, /повсед/i],
+        ].map(([re, want]) => (re.test(n) ? list.find(x => want.test(x)) : '')).find(Boolean)
+        || '';
+}
+
+const catsLine = (cats) => catList(cats).map(c => { const h = CAT_HINTS[norm(c)]; return h ? `«${c}» — ${h}` : `«${c}»`; }).join('; ');
+
+/** Системный промт разбора образа: фото и/или готовый промт → название, раздел, промт образа, вещи. */
+export function lookSystem(cats, withLook = false) {
+    return `Ты — стилист-костюмер. Тебе дают фото готового образа и/или готовый промт картинки с образом. Разбери образ: одежду, обувь, сумки, украшения${withLook ? ', причёску и макияж' : ''}.
+Верни только JSON без пояснений:
+{"name":"","cat":"","prompt":"","items":[{"name":"","slot":"","desc":""}]}
+- name — название образа по-русски, 2–5 слов, по главной вещи или настроению («Чёрное платье на халтере», «Кремовый блейзер и оливковый шёлк»).
+- cat — ровно один раздел из списка (пиши как в списке): ${catsLine(cats)}.
+- prompt — промт образа ПО-АНГЛИЙСКИ для генератора картинок, 40–90 слов: только одежда, обувь, сумка, украшения${withLook ? ', причёска (без цвета волос) и макияж' : ''} — цвета, ткани, фасон, посадка, длина, детали. Без лица, внешности, телосложения, позы, фона, света, камеры и стиля рисования.
+- items — каждая отдельная вещь:
+  name — короткое название по-русски, 2–6 слов: цвет, материал, фасон («чёрное шерстяное пальто до колена»);
+  slot — одно из: outer (верхняя одежда), dress (платье/комбинезон), top (верх), bottom (низ), under (бельё), legwear (носки/колготки/чулки), shoes (обувь), head (головной убор), acc (аксессуары, украшения, сумки, очки, ремни)${withLook ? ', hair (причёска — только форма, длина, укладка, заколки, без цвета волос), makeup (макияж целиком одной вещью)' : ''}, other;
+  desc — 1–2 предложения по-русски: ткань, цвет, фасон, посадка, длина, детали (пуговицы, принт, вырез).
+- Если дан промт — бери из него только образ; стиль рисования, фон, свет, внешность, позу и камеру выбрось.
+- Если на фото чего-то не видно (обувь за кадром) — не выдумывай.
+- ${withLook ? 'Причёску и макияж добавь отдельными вещами, если они видны или описаны.' : 'Причёску и макияж НЕ добавляй и в prompt не пиши: образ наденут на другого человека, у него свои волосы и лицо.'}`;
+}
+
+/** Ответ модели на разбор образа → { name, cat, prompt, items }. */
+export function parseLook(text, cats, withLook = false) {
+    const j = extractJson(text) || {};
+    const raw = Array.isArray(j.items) ? j.items : [];
+    const items = raw
+        .filter(x => x && String(x.name || '').trim())
+        .map(x => ({ name: cut(x.name, 80), slot: normSlot(x.slot), desc: String(x.desc || '').trim() }))
+        .filter(x => withLook || !isLook(x.slot));
+    return {
+        name: cut(String(j.name || '').replace(/^["«]|["»]$/g, ''), 60),
+        cat: matchCat(j.cat, cats),
+        prompt: String(j.prompt || '').replace(/\s+/g, ' ').trim().slice(0, 1200),
+        items,
+    };
+}
+
+/** Разложить уже сохранённые образы по разделам: короткие id → раздел. */
+export function catSystem(cats) {
+    return `Ты — стилист. Распредели образы гардероба по разделам. Разделы (пиши как в списке): ${catsLine(cats)}.
+Для каждого образа по названию и вещам выбери ровно один раздел. Ответ — только JSON без пояснений: {"cats":{"l1":"Офис","l2":"Вечернее"}}`;
+}
+
+/** Образ надет целиком (все его вещи на персонаже)? */
+export function wornAll(st, set) {
+    const ids = set?.itemIds || [];
+    return !!ids.length && ids.every(id => (st?.worn || []).some(e => e.itemId === id));
+}
+
+// версии картинок: новая картинка встаёт поверх, прежние остаются и листаются
+export const GALLERY_MAX = 12;
+
+/** Все версии картинки вещи/образа: imgs + текущая img (если её туда не положили — например, Life). */
+export function galleryOf(o) {
+    const out = [];
+    for (const u of [...(Array.isArray(o?.imgs) ? o.imgs : []), o?.img]) if (u && !out.includes(u)) out.push(u);
+    return out;
+}
+
+/** Новая версия: в конец списка и сразу текущей. */
+export function pushImg(o, path, max = GALLERY_MAX) {
+    if (!o || !path) return o;
+    const g = galleryOf(o).filter(u => u !== path);
+    g.push(path);
+    o.imgs = g.slice(-max);
+    o.img = path;
+    return o;
+}
+
+/** Листнуть версию: dir = 1 / -1 (по кругу). Возвращает новую текущую. */
+export function stepImg(o, dir) {
+    const g = galleryOf(o);
+    if (g.length < 2) return o?.img || '';
+    let i = g.indexOf(o.img);
+    if (i < 0) i = g.length - 1;
+    o.imgs = g;
+    o.img = g[(i + (dir < 0 ? -1 : 1) + g.length) % g.length];
+    return o.img;
+}
+
+/** Убрать текущую версию: текущей станет предыдущая (или ничего). */
+export function dropImg(o) {
+    const g = galleryOf(o);
+    const i = g.indexOf(o?.img);
+    const rest = g.filter(u => u !== o?.img);
+    if (!o) return '';
+    o.imgs = rest;
+    o.img = rest.length ? rest[Math.max(0, Math.min(rest.length - 1, i - 1))] : '';
+    return o.img;
+}
+
 /** «Bucky Barnes = Баки, Барнс» → { 'Bucky Barnes': ['баки','барнс'] } */
 export function parseAliases(text) {
     const map = {};

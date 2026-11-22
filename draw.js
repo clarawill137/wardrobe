@@ -3,34 +3,62 @@
 // Atlas Cloud (наш патч SLAY), Naistera, OpenRouter (Nano Banana и др.), Gemini, xAI (Grok), OpenAI-совместимые.
 // Подключение берётся из профилей sillyimages или из своих полей в настройках гардероба.
 
+// «Масло, полуреализм» (1.8, по её референсам): живопись маслом, полуреализм, тот же человек дважды на светлом фоне —
+// слева в полный рост анфас, справа крупнее, в три четверти от колен. Портрет 2:3.
+const OIL = 'Semi-realistic oil painting fashion illustration: painterly visible brushstrokes, softly blended skin, realistic anatomy and proportions, refined muted palette, fabrics painted with texture, folds and sheen.';
+const OIL_TWO = 'The same person is shown twice on one canvas: on the left a smaller full-body figure standing straight, front view, arms relaxed, from head to shoes fully in frame; on the right a larger three-quarter view of the same person from the knees up, body turned slightly, calm gaze at the viewer, the two figures slightly overlapping.';
+const OIL_BG = 'Plain light grey background with a subtle painted canvas texture, soft diffused daylight, gentle natural shadows. No props, no furniture, no text, no logo, no watermark, no frame, no doodles.';
+
 export const STYLES = {
-    clover: {
-        t: 'Лукбук на человеке (как в CLOVER)',
+    oil: {
+        t: 'Масло, полуреализм — два ракурса',
+        short: 'Масло',
+        d: 'масляная живопись, полуреализм: в полный рост и крупнее в три четверти, светлый фон',
         person: true,
+        aspect: '2:3',
+        p: `${OIL} One person wearing this item, with simple plain neutral basics for the rest of the outfit. ${OIL_TWO} ${OIL_BG}`,
+        set: `${OIL} One person wearing this complete outfit. ${OIL_TWO} ${OIL_BG}`,
+        look: `${OIL} One person shown twice to showcase the {kind} clearly: on the left a three-quarter view, on the right a larger head-and-shoulders close-up from the front, calm gaze at the viewer. ${OIL_BG}`,
+        detail: `${OIL} Two views on one canvas: on the left a large, detailed close-up of {focus}; on the right {right}, dressed in simple plain neutral basics so this piece stands out as the hero. ${OIL_BG}`,
+    },
+    clover: {
+        t: 'Карандаш, лукбук на человеке (как было)',
+        short: 'Карандаш',
+        d: 'цветной карандаш, полный рост + крупно, чёрный фон с дудлами',
+        person: true,
+        aspect: '4:3',
         p: 'Fashion lookbook illustration in a clean semi-realistic digital sketch style with soft colored-pencil shading and crisp linework: one person wearing this item (with simple neutral basics for the rest), shown twice — a full-body standing pose on the left and a cheerful waist-up close-up on the right. Solid black background with a faint white grid on the left half, playful hand-drawn white doodles around (little stars, hearts, sparkles, exclamation marks). Warm natural skin, expressive but natural face. No text, no logo.',
         set: 'Fashion lookbook illustration in a clean semi-realistic digital sketch style with soft colored-pencil shading and crisp linework: one person wearing this complete outfit, shown twice — a full-body standing pose on the left and a cheerful waist-up close-up on the right. Solid black background with a faint white grid on the left half, playful hand-drawn white doodles around (little stars, hearts, sparkles, exclamation marks). Warm natural skin, expressive but natural face. No text, no logo.',
         look: 'Beauty lookbook illustration in a clean semi-realistic digital sketch style with soft colored-pencil shading: one person shown twice — a head-and-shoulders close-up from the front on the right and a three-quarter view on the left, to showcase the {kind} clearly. Solid black background, playful hand-drawn white doodles (stars, sparkles, hearts). No text, no logo.',
     },
     sketch: {
         t: 'Скетч модельера (акварель)',
+        short: 'Акварель',
+        d: 'акварель и тушь, вещь отдельно, без человека',
         p: 'Fashion design illustration: watercolor and fine ink sketch of a single garment on clean off-white paper, elegant loose brushwork, soft natural shadow, the item drawn alone, no model, no person, no mannequin, no hands, no text, no logo.',
         set: 'Fashion design illustration: watercolor and fine ink sketch on clean off-white paper, elegant loose brushwork, soft natural shadow, no model, no person, no mannequin, no hands, no text, no logo.',
         look: 'Beauty fashion illustration: watercolor and fine ink sketch of a head-and-shoulders portrait on clean off-white paper, elegant loose brushwork, focused on showing the {kind}. No text, no logo.',
     },
     photo: {
         t: 'Фото из каталога',
+        short: 'Каталог',
+        d: 'фото вещи на сером фоне, без человека',
         p: 'E-commerce catalog product photo of a single garment, ghost mannequin or neat flat lay, plain light-grey seamless background, soft diffused studio light, high detail fabric texture, no person, no text, no logo.',
         set: 'Editorial flat-lay product photo, plain light-grey seamless background, soft diffused studio light, high detail fabric texture, no person, no text, no logo.',
         look: 'Beauty editorial photo, head-and-shoulders portrait on a plain light-grey background, soft diffused studio light, focused on showing the {kind}. No text, no logo.',
     },
     anime: {
         t: 'Аниме-иллюстрация',
+        short: 'Аниме',
+        d: 'чистый лайн, пастель, без человека',
         p: 'Anime style item illustration of a single garment, clean lineart, soft cel shading, pastel palette, plain white background, no person, no text.',
         set: 'Anime style illustration, clean lineart, soft cel shading, pastel palette, plain white background, no person, no text.',
         look: 'Anime style head-and-shoulders portrait, clean lineart, soft cel shading, pastel palette, plain white background, focused on showing the {kind}. No text.',
     },
     pixel: {
         t: 'Иконка (как в игре)',
+        short: 'Иконки',
+        d: 'милая 3D-иконка вещи',
         p: 'Cute game inventory icon of a single clothing item, soft 3D render, rounded shapes, gentle pastel lighting, centered on a plain soft background, no person, no text.',
         set: 'Cute game inventory illustration, soft 3D render, rounded shapes, gentle pastel lighting, plain soft background, no person, no text.',
         look: 'Cute stylized 3D character bust, soft render, gentle pastel lighting, plain soft background, focused on showing the {kind}. No text.',
@@ -46,8 +74,21 @@ const DETAIL = {
     shoes: { focus: 'the feet and ankles wearing the shoes, from a low side angle', right: 'a full-body standing pose of the person wearing them' },
     legwear: { focus: 'the legs wearing the hosiery or socks', right: 'a full-body standing pose of the person wearing them' },
 };
-const DETAIL_PROMPT = 'Fashion lookbook illustration in a clean semi-realistic digital sketch style with soft colored-pencil shading and crisp linework, two panels side by side: on the left a large, detailed close-up of {focus}; on the right {right}, dressed in simple plain neutral basics so this piece stands out as the hero. Solid black background with a faint white grid behind the close-up, playful hand-drawn white doodles around (little stars, hearts, sparkles, exclamation marks). Warm natural skin, expressive but natural face. No text, no logo.';
+STYLES.clover.detail = 'Fashion lookbook illustration in a clean semi-realistic digital sketch style with soft colored-pencil shading and crisp linework, two panels side by side: on the left a large, detailed close-up of {focus}; on the right {right}, dressed in simple plain neutral basics so this piece stands out as the hero. Solid black background with a faint white grid behind the close-up, playful hand-drawn white doodles around (little stars, hearts, sparkles, exclamation marks). Warm natural skin, expressive but natural face. No text, no logo.';
 const PERSON_REF_RULE = 'The attached reference image shows the exact person: keep their face, features, skin tone and body type exactly as in the reference.';
+
+/** Короткое имя стиля для чипа: «Масло», «Карандаш»… */
+export function styleShort(s) {
+    if (s?.imgStyle === 'custom') return 'Свой';
+    return STYLES[s?.imgStyle]?.short || 'Акварель';
+}
+
+/** Соотношение сторон картинки: у масла портрет 2:3, у карандашного лукбука 4:3, у вещей без человека квадрат. */
+export function styleAspect(s, slot = '') {
+    return STYLES[s?.imgStyle]?.aspect || (styleHasPerson(s, slot) ? '4:3' : '1:1');
+}
+
+const styleDetail = (s, slot) => (DETAIL[slot] && STYLES[s?.imgStyle]?.detail) || '';
 
 export const DEFAULT_MODELS = {
     openrouter: 'google/gemini-3.1-flash-image',
@@ -104,30 +145,44 @@ export function itemPrompt(it, s, { personRef = false, photoRef = false } = {}) 
         lines.push(stylePrompt(s, 'look').replace('{kind}', kind));
         lines.push(`The ${kind}: ${it.name}.${it.desc ? ` ${it.desc}` : ''}`);
         if (kind === 'hairstyle') lines.push('Keep the person\'s own natural hair colour; only the hairstyle matters.');
-    } else if (s.imgStyle === 'clover' && DETAIL[it.slot]) {
-        lines.push(DETAIL_PROMPT.replace('{focus}', DETAIL[it.slot].focus).replace('{right}', DETAIL[it.slot].right));
+    } else if (styleDetail(s, it.slot)) {
+        const right = s.imgStyle === 'clover' ? DETAIL[it.slot].right : DETAIL[it.slot].right.replace('cheerful ', '');
+        lines.push(styleDetail(s, it.slot).replace('{focus}', DETAIL[it.slot].focus).replace('{right}', right));
         lines.push(`The piece: ${it.name}.${it.desc ? ` ${it.desc}` : ''}`);
-        lines.push('Both panels show exactly this same piece with identical colour, material and details.');
+        lines.push('Both views show exactly this same piece with identical colour, material and details.');
     } else {
         lines.push(stylePrompt(s, 'p'));
         lines.push(`The item: ${it.name}.${it.desc ? ` ${it.desc}` : ''}`);
         if (!STYLES[s.imgStyle]?.person) lines.push('Show only this one item, centered, fully visible, nothing else in the frame.');
     }
     if (personRef && photoRef) lines.push('Two images are attached: image 1 is the person, image 2 is the photo of the item.');
-    if (personRef) lines.push(PERSON_REF_RULE + (kind === 'hairstyle' ? ' Change only the hairstyle.' : kind === 'makeup' ? ' Change only the makeup.' : DETAIL[it.slot] && s.imgStyle === 'clover' ? ' Put this piece on them.' : ' Dress them in this item.'));
+    if (personRef) lines.push(PERSON_REF_RULE + (kind === 'hairstyle' ? ' Change only the hairstyle.' : kind === 'makeup' ? ' Change only the makeup.' : styleDetail(s, it.slot) ? ' Put this piece on them.' : ' Dress them in this item.'));
     if (photoRef) lines.push('The attached photo shows the real item (maybe as part of a whole outfit): reproduce ONLY this item from it, keeping its exact colour, fabric and details.');
     return lines.join('\n');
 }
 
-export function setPrompt(set, items, s, { itemRefs = false, personRef = false } = {}) {
+/**
+ * Промт обложки образа. set.prompt (считанный с фото или вставленный готовый) идёт описанием образа,
+ * вещи — списком. outfitRef: приложено фото этого образа на другом человеке (импорт) — повторить одежду, не человека.
+ */
+export function setPrompt(set, items, s, { itemRefs = false, personRef = false, outfitRef = false } = {}) {
     const list = items.map((it, i) => `${i + 1}) ${LOOK_KIND[it.slot] ? `${LOOK_KIND[it.slot]}: ` : ''}${it.name}${it.desc ? ` — ${it.desc}` : ''}`).join('\n');
     const person = !!STYLES[s.imgStyle]?.person;
-    return `${stylePrompt(s, 'set')}\n`
-        + (person ? `The outfit "${set.name}" is made of exactly these pieces:\n` : `A neat flat-lay composition of one complete outfit "${set.name}", made of exactly these pieces, each fully visible:\n`)
-        + `${list}\n`
-        + (personRef ? `${PERSON_REF_RULE} Dress them in this outfit.\n` : '')
-        + (itemRefs ? `The ${personRef ? 'other ' : ''}attached images show these exact pieces — keep their colors, fabrics and details.\n` : '')
-        + (person ? '' : 'No person wearing it.');
+    const lines = [stylePrompt(s, 'set')];
+    if (set.prompt) lines.push(`The outfit "${set.name}": ${set.prompt}`);
+    if (list) {
+        lines.push(set.prompt ? `Its pieces:\n${list}`
+            : person ? `The outfit "${set.name}" is made of exactly these pieces:\n${list}`
+                : `A neat flat-lay composition of one complete outfit "${set.name}", made of exactly these pieces, each fully visible:\n${list}`);
+    } else if (!person) lines.push(`A neat flat-lay composition of this complete outfit, each piece fully visible.`);
+    if (personRef) lines.push(`${PERSON_REF_RULE} Dress them in this outfit.`);
+    if (outfitRef) {
+        lines.push(person
+            ? `The ${personRef ? 'second' : ''} attached image shows this exact outfit worn by someone else: reproduce the clothes faithfully — the same pieces, colours, fabrics, cut, length and accessories — ${personRef ? 'on the person from the first image' : 'on a person'}. Ignore that other person's face, hair and body, and do not copy its background or art style.`.replace('The  ', 'The ')
+            : 'The attached image shows this outfit on a person: reproduce exactly these garments as the flat-lay pieces, with the same colours, fabrics and details.');
+    } else if (itemRefs) lines.push(`The ${personRef ? 'other ' : ''}attached images show these exact pieces — keep their colors, fabrics and details.`);
+    if (!person) lines.push('No person wearing it.');
+    return lines.join('\n');
 }
 
 /** Ключи из Телеграма часто приходят с невидимыми символами — из-за них 401. */
