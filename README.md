@@ -25,7 +25,10 @@
   маслом, тот же человек дважды на светлом фоне — в полный рост и крупнее в три четверти, портрет 2:3), вещи — прежний
   карандашный лукбук. Акварель, каталог, аниме, иконки и свой стиль — выбором в 🎨 на странице образов (два ряда:
   «Образы» и «Вещи в шкафу») или в ⚙. Лицо — из рефов sillyimages/SLAY или аватарки. Рисует через
-  SLAY / sillyimages (Atlas Cloud, Naistera, OpenRouter, Gemini, xAI, OpenAI) или свой ключ.
+  SLAY / sillyimages (Atlas Cloud, Naistera, OpenRouter, Gemini, xAI, OpenAI) или свой ключ. У Atlas (1.8.5) — все рисовалки
+  SLAY: Nano Banana, Grok, GPT Image 2 / 2.5, Seedream 5.0 / 5.5, FLUX 3, MAI-Image 2.6, Qwen Image 3.0, Wan 2.7,
+  Grok Imagine 2.0, Midjourney V8.2, Flux Kontext (и с LoRA из SLAY), а по тексту — Flux Dev, Grok, Midjourney, Krea 2 Turbo.
+  Лицо по рефу держат только модели с рефами; проверка запросов — `node tools/atlas-test/atlas.mjs`.
 - **Состав образа** (1.8.3): вещи по разделам (подзаголовки и чипы «Обувь», «Низ»…); у образа с владельцем — только его
   вещи, у общего — чипы людей.
 - Основная модель перед каждым ответом получает записку, кто во что одет.

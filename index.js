@@ -11,11 +11,11 @@ import {
     matchScore, ownerWordsOf, DEFAULT_CATS, CORE_CATS, catList, matchCat, lookSystem, parseLook, catSystem, wornAll,
     galleryOf, pushImg, stepImg, dropImg, fixLookOwners, baseName,
 } from './core.js';
-import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, ATLAS_EDIT, resolveConnection, generateImage, itemPrompt, setPrompt, styleHasPerson, styleShort, styleAspect } from './draw.js';
+import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, ATLAS_EDIT, atlasTakesRefs, resolveConnection, generateImage, itemPrompt, setPrompt, styleHasPerson, styleShort, styleAspect } from './draw.js';
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.8.4';
+const VERSION = '1.8.5';
 
 const DEFAULTS = {
     enabled: true,
@@ -738,6 +738,8 @@ function noteFace(name, ref) {
 }
 
 const REF_TYPES = ['openrouter', 'gemini', 'naistera', 'atlas'];
+/** Подключение берёт рефы (лицо, фото вещи): у Atlas — только модели с рефами (t2i-модели SLAY рисуют по тексту). */
+const refsOk = (conn) => REF_TYPES.includes(conn.apiType) && (conn.apiType !== 'atlas' || atlasTakesRefs(conn.model));
 
 function waitToast(sec, status) {
     toast('info', status === 429 ? `Сервис просит не так часто — жду ${sec} с и пробую снова` : `Сервис картинок сбоит — повтор через ${sec} с`, '👗 Гардероб', { timeOut: Math.min(sec, 8) * 1000 });
@@ -756,7 +758,7 @@ async function drawItem(id, { ref = '' } = {}) {
     drawing.add(id);
     paintDrawing();
     try {
-        const canRef = REF_TYPES.includes(conn.apiType);
+        const canRef = refsOk(conn);
         const wantFace = canRef && s.imgOnPerson !== 'model' && styleHasPerson(s, it.slot);
         const who = wantFace ? itemWearer(it) : '';
         const face = wantFace ? await personRefFor(who) : null;
@@ -795,7 +797,7 @@ async function drawSet(id) {
     drawing.add(id);
     paintDrawing();
     try {
-        const canRef = REF_TYPES.includes(conn.apiType);
+        const canRef = refsOk(conn);
         const wantFace = canRef && s.imgOnPerson !== 'model' && styleHasPerson(s);
         const who = set.owner || lookTarget(set) || (ui.tab === 'worn' ? ui.who : '');
         const face = wantFace ? await personRefFor(who) : null;
@@ -1794,7 +1796,7 @@ function imgSettings(s) {
     return `<div class="wd-sec">🎨 Картинки вещей</div>
         <div class="wd-field"><label>Чем рисовать</label><select data-set="imgSource">${opts.map(([v, t]) => `<option value="${esc(v)}" ${v === src ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
         ${own}
-        ${conn.apiType === 'atlas' ? `<div class="wd-field"><label>Модель Atlas для вещей <small>(нужна edit-модель: она держит лицо по рефу)</small></label><select data-set="imgAtlasModel"><option value="">${esc(slay?.apiType === 'atlas' && ATLAS_EDIT[slay.atlasModel] ? `как в SLAY (${ATLAS_EDIT[slay.atlasModel].t})` : `по умолчанию (${ATLAS_EDIT[DEFAULT_MODELS.atlas].t})`)}</option>${Object.entries(ATLAS_EDIT).map(([m, v]) => `<option value="${esc(m)}" ${m === s.imgAtlasModel ? 'selected' : ''}>${esc(v.t)}</option>`).join('')}</select></div>` : ''}
+        ${conn.apiType === 'atlas' ? `<div class="wd-field"><label>Модель Atlas для вещей и образов <small>(все рисовалки SLAY; лицо по рефу держат только модели с рефами)</small></label><select data-set="imgAtlasModel"><option value="">${esc(slay?.apiType === 'atlas' && atlasTakesRefs(slay.atlasModel) ? `как в SLAY (${ATLAS_EDIT[slay.atlasModel].t})` : `по умолчанию (${ATLAS_EDIT[DEFAULT_MODELS.atlas].t})`)}</option>${[['С рефами — держат лицо', true], ['Только по тексту — лицо не держат', false]].map(([g, refs]) => `<optgroup label="${g}">${Object.entries(ATLAS_EDIT).filter(([m]) => atlasTakesRefs(m) === refs).map(([m, v]) => `<option value="${esc(m)}" ${m === s.imgAtlasModel ? 'selected' : ''}>${esc(v.t)}</option>`).join('')}</optgroup>`).join('')}</select></div>` : ''}
         ${conn.apiType === 'naistera' ? `<div class="wd-field"><label>Модель Naistera для вещей</label><select data-set="imgNaisteraModel"><option value="">как в профиле (NovelAI → Nano Banana)</option>${NAISTERA_MODELS.map(m => `<option value="${m}" ${m === s.imgNaisteraModel ? 'selected' : ''}>${m}</option>`).join('')}</select></div>` : ''}
         <div class="wd-field"><label>Стиль образов</label><select data-set="imgStyle">${Object.entries(STYLES).map(([k, v]) => `<option value="${k}" ${k === s.imgStyle ? 'selected' : ''}>${esc(v.t)}</option>`).join('')}<option value="custom" ${s.imgStyle === 'custom' ? 'selected' : ''}>Свой промпт стиля</option></select></div>
         <div class="wd-field"><label>Стиль вещей в шкафу</label><select data-set="itemStyle">${Object.entries(STYLES).map(([k, v]) => `<option value="${k}" ${k === s.itemStyle ? 'selected' : ''}>${esc(v.t)}</option>`).join('')}<option value="custom" ${s.itemStyle === 'custom' ? 'selected' : ''}>Свой промпт стиля</option></select></div>

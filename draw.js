@@ -104,14 +104,112 @@ export const DEFAULT_MODELS = {
     atlas: 'google/nano-banana-pro/edit-developer',
 };
 
-/** Atlas Cloud: модели, которые умеют рефы (лицо + фото вещи). Без рефов edit-модель сама переходит на свою t2i-версию. */
+/**
+ * Atlas Cloud — все рисовалки патч-SLAY (её «добавь все из слей», 22.11; схемы запросов — как в SLAY_ATLAS_MORE_V1).
+ * max > 0 — модель берёт рефы (лицо + фото вещи) и держит лицо; без рефов edit-модель сама переходит на свою t2i-версию.
+ * max 0 — рисует только по тексту: лицо по рефу не держит. kind — как собирать запрос; loose — схема у Atlas описана не
+ * до конца (на отказ — без base64 / другие имена размеров); compose — модель по умолчанию правит первую картинку, просим новую.
+ */
 export const ATLAS_EDIT = {
     'google/nano-banana-pro/edit-developer': { field: 'images', t2i: 'google/nano-banana-pro/text-to-image', kind: 'banana', max: 5, t: 'Nano Banana Pro Edit dev (дешевле)' },
     'google/nano-banana-pro/edit': { field: 'images', t2i: 'google/nano-banana-pro/text-to-image', kind: 'banana', max: 5, t: 'Nano Banana Pro Edit' },
     'xai/grok-imagine-image-quality/edit': { field: 'image_urls', t2i: 'xai/grok-imagine-image-quality/text-to-image', kind: 'grok', max: 5, t: 'Grok Image Edit' },
     'openai/gpt-image-2/edit': { field: 'images', t2i: 'openai/gpt-image-2/text-to-image', kind: 'gpt', max: 5, t: 'GPT Image 2 Edit' },
+    'bytedance/seedream-v5.0-pro/edit': { field: 'images', t2i: 'bytedance/seedream-v5.0-pro/text-to-image', kind: 'seedream', max: 10, t: 'Seedream 5.0 Pro Edit' },
+    'bytedance/seedream-v5.5/edit': { field: 'reference_images', t2i: 'bytedance/seedream-v5.5/text-to-image', kind: 'seedream55', max: 10, t: 'Seedream 5.5 Edit (дёшево)' },
+    'black-forest-labs/flux-3/edit': { field: 'reference_images', t2i: 'black-forest-labs/flux-3/text-to-image', kind: 'flux3', max: 10, loose: true, t: 'FLUX 3 Edit (мягкий фильтр)' },
+    'openai/gpt-image-2.5-sunburst-developer/edit': { field: 'images', t2i: 'openai/gpt-image-2.5-sunburst-developer/text-to-image', kind: 'gpt', max: 10, loose: true, t: 'GPT Image 2.5 Sunburst Edit' },
+    'microsoft/mai-image-2.6/edit': { field: 'reference_images', t2i: 'microsoft/mai-image-2.6/text-to-image', kind: 'mai', max: 5, loose: true, compose: true, t: 'MAI-Image 2.6 Edit (фотореализм)' },
+    'qwen-image-3.0-pro/edit': { field: 'reference_image_urls', t2i: 'qwen-image-3.0-pro/text-to-image', kind: 'qwen', max: 3, loose: true, compose: true, t: 'Qwen Image 3.0 Pro Edit (бета)' },
+    'alibaba/wan-2.7-pro/image-edit': { field: 'images', t2i: 'alibaba/wan-2.7-pro/text-to-image', kind: 'wan', max: 9, loose: true, compose: true, t: 'Wan 2.7 Pro Edit' },
+    'xai/grok-imagine-image-2.0/edit': { field: 'image_urls', t2i: 'xai/grok-imagine-image-2.0/text-to-image', kind: 'grok2', max: 3, loose: true, compose: true, t: 'Grok Imagine 2.0 Edit' },
+    'midjourney/v8.2/image-to-image': { field: 'image', single: true, url: true, t2i: 'midjourney/v8.2/text-to-image', kind: 'mj', max: 1, t: 'Midjourney V8.2 (1 реф как образец)' },
     'black-forest-labs/flux-kontext-dev': { field: 'image', t2i: 'black-forest-labs/flux-dev', kind: 'kontext', max: 1, t: 'Flux Kontext Dev (1 реф)' },
+    'black-forest-labs/flux-kontext-dev-lora': { field: 'image', t2i: 'black-forest-labs/flux-dev-lora', kind: 'kontext', max: 1, lora: true, t: 'Flux Kontext Dev LoRA (1 реф, LoRA из SLAY)' },
+    // только по тексту — лицо по рефу не держат
+    'black-forest-labs/flux-dev': { kind: 'fluxdev', max: 0, t: 'Flux Dev (без рефов)' },
+    'black-forest-labs/flux-dev-lora': { kind: 'fluxdev', max: 0, lora: true, t: 'Flux Dev LoRA (без рефов, LoRA из SLAY)' },
+    'xai/grok-imagine-image-quality/text-to-image': { kind: 'grok', max: 0, t: 'Grok Image (без рефов)' },
+    'midjourney/v8.2/text-to-image': { kind: 'mj', max: 0, t: 'Midjourney V8.2 (без рефов)' },
+    'krea-2-turbo/text-to-image': { kind: 'krea', max: 0, loose: true, t: 'Krea 2 Turbo (без рефов)' },
 };
+/** Модель Atlas держит лицо (берёт рефы). */
+export const atlasTakesRefs = (model) => (ATLAS_EDIT[model]?.max || 0) > 0;
+
+// ── как SLAY собирает запросы Atlas (SLAY_ATLAS_MORE_V1, SLAY_GROK_AR_V1) ──
+const ATLAS_ASPECTS = {
+    grok: ['1:1', '3:4', '4:3', '9:16', '16:9', '2:3', '3:2', '9:19.5', '19.5:9', '9:20', '20:9', '1:2', '2:1', '21:9', '5:2'],
+    grok2: ['1:1', '3:4', '4:3', '9:16', '16:9', '2:3', '3:2', '9:19.5', '19.5:9', '9:20', '20:9', '1:2', '2:1'],
+    mj: ['1:1', '9:16', '16:9', '4:3', '3:4', '2:3', '3:2', '9:21', '21:9'],
+    flux3: ['21:9', '2:1', '16:9', '3:2', '7:5', '4:3', '5:4', '1:1', '4:5', '3:4', '5:7', '2:3', '9:16', '1:2'],
+};
+const SEEDREAM_SIZES = ['2048*2048', '2368*1776', '1776*2368', '2816*1584', '1584*2816', '2496*1664', '1664*2496', '3136*1344',
+    '1024*1024', '1536*1536', '1776*1328', '1328*1776', '2048*1152', '1152*2048'];
+const SEEDREAM55_SIZES = ['2048*2048', '2368*1776', '1776*2368', '2816*1584', '1584*2816', '2496*1664', '1664*2496', '3136*1344',
+    '1536*1536', '1792*1344', '1344*1792', '2048*1152', '1152*2048', '1872*1248', '1248*1872', '2352*1008', '1024*1024', '1152*864',
+    '864*1152', '1424*800', '800*1424', '1248*832', '832*1248', '1568*672'];
+const COMPOSE_NOTE = 'Make a NEW picture from the description below: the attached images give only the person\'s face and the clothes; pose, framing, light and background come from the description.';
+const ratioOf = (x, sep = ':') => { const [w, h] = String(x || '').split(sep).map(Number); return w > 0 && h > 0 ? w / h : NaN; };
+function snapAspect(ar, kind) {
+    const list = ATLAS_ASPECTS[kind];
+    if (!list || list.includes(ar)) return ar;
+    const want = ratioOf(ar);
+    if (!Number.isFinite(want)) return '2:3';
+    let best = list[0], d = Infinity;
+    for (const c of list) { const x = Math.abs(Math.log(ratioOf(c) / want)); if (x < d) { d = x; best = c; } }
+    return best;
+}
+function seedreamSize(ar, list, biggest = false) {
+    let want = ratioOf(ar);
+    if (!Number.isFinite(want)) want = 2 / 3;
+    const dist = (sz) => Math.abs(Math.log(ratioOf(sz, '*') / want));
+    const px = (sz) => sz.split('*').reduce((a, b) => a * Number(b), 1);
+    const best = Math.min(...list.map(dist));
+    const same = list.filter(sz => dist(sz) - best < 0.01);
+    const cheap = same.filter(sz => px(sz) <= 2.61e6).sort((a, b) => px(b) - px(a));
+    return biggest ? same.sort((a, b) => px(b) - px(a))[0] : (cheap[0] || same.sort((a, b) => px(a) - px(b))[0]);
+}
+function qwenSize(ar, max) {
+    let r = ratioOf(ar);
+    if (!Number.isFinite(r)) r = 2 / 3;
+    const f = (x) => Math.max(512, Math.min(max, Math.round(x / 16) * 16));
+    return r >= 1 ? `${f(max)}*${f(max / r)}` : `${f(max * r)}*${f(max)}`;
+}
+function kreaSize(ar, alt) {
+    let want = ratioOf(ar);
+    if (!Number.isFinite(want)) want = 2 / 3;
+    const opts = [['square_hd', 1], [alt ? 'portrait_4_3' : 'portrait_3_4', 3 / 4], [alt ? 'portrait_16_9' : 'portrait_9_16', 9 / 16], ['landscape_4_3', 4 / 3], ['landscape_16_9', 16 / 9]];
+    let pick = opts[0][0], d = Infinity;
+    for (const [name, r] of opts) { const x = Math.abs(Math.log(r / want)); if (x < d) { d = x; pick = name; } }
+    return pick;
+}
+const frameHint = (ar) => { const r = ratioOf(ar); return `Frame: ${!Number.isFinite(r) || r < 0.95 ? 'vertical (portrait)' : r > 1.05 ? 'horizontal (landscape)' : 'square'}, aspect ratio ${ar}.`; };
+/** Midjourney: не длиннее 1000 знаков и сначала — что за образ: строки про рефы ей ни о чём, стиль — после. */
+function mjPrompt(p, max = 1000) {
+    const lines = String(p).split('\n').filter(l => l.trim() && !/^(The attached|Take only the identity|Two images are attached|Make a NEW picture)/.test(l));
+    const out = [...lines.slice(1), lines[0] || ''].filter(Boolean).join('\n');
+    if (out.length <= max) return out;
+    const cut = out.slice(0, max);
+    const end = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('\n'));
+    return (end > max * 0.6 ? cut.slice(0, end + 1) : cut).trim();
+}
+/** Реф меньше max px по большей стороне (MAI берёт рефы до ~1,4 Мп). */
+async function shrinkDataUrl(d, max) {
+    try {
+        if (typeof Image === 'undefined' || typeof document === 'undefined') return d;
+        const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = d; });
+        const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+        if (k >= 1) return d;
+        const cv = document.createElement('canvas');
+        cv.width = Math.round(img.naturalWidth * k);
+        cv.height = Math.round(img.naturalHeight * k);
+        cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+        return cv.toDataURL('image/jpeg', 0.9);
+    } catch { return d; }
+}
+// что Atlas у модели уже не принял (до перезагрузки страницы): data URL вместо ссылок, base64 в ответе, имена размеров Krea
+const atlasUrlOnly = new Set(), atlasNoB64 = new Set(), kreaAlt = new Set();
+const MODERATION_RE = /moderat|flagged|sensitive|safety|policy|prohibit|nsfw/i;
 
 export const NAISTERA_MODELS = ['nano banana', 'grok', 'grok-pro', 'novelai'];
 
@@ -215,7 +313,9 @@ export function resolveConnection(s, ext) {
         const slKey = sl.apiKey || sl.naisteraApiKey || sl.naisteraKey || sl.apiKeys?.[sl.apiType] || '';
         if (sl.apiType === 'atlas') {
             // наш патч SLAY: эндпоинт как есть (может быть свой прокси), модель — edit-версия, чтобы держать лицо
-            c = { apiType: 'atlas', endpoint: String(sl.endpoint || '').trim().replace(/\/+$/, ''), apiKey: slKey, model: ATLAS_EDIT[sl.atlasModel] ? sl.atlasModel : '' };
+            let loras = [];
+            try { const x = JSON.parse(String(sl.atlasLoras || '').trim() || '[]'); if (Array.isArray(x)) loras = x; } catch { /* не JSON */ }
+            c = { apiType: 'atlas', endpoint: String(sl.endpoint || '').trim().replace(/\/+$/, ''), apiKey: slKey, model: atlasTakesRefs(sl.atlasModel) ? sl.atlasModel : '', loras, loraTriggers: String(sl.atlasTriggers || '').trim() };
         } else if (sl.apiType === 'naistera') c = { apiType: 'naistera', endpoint: base, apiKey: slKey, model: normalizeNaistera(sl.naisteraModel) || 'grok' };
         else if (sl.apiType === 'gemini') c = { apiType: 'gemini', endpoint: base, apiKey: sl.apiKey, model: sl.model };
         else if (sl.apiType === 'openai' || sl.apiType === 'custom') c = { apiType: 'openrouter', endpoint: base ? `${base}/v1` : '', apiKey: slKey, model: sl.model };
@@ -246,6 +346,7 @@ export function resolveConnection(s, ext) {
         model,
         endpoint: String(c.endpoint || '').trim().replace(/\/+$/, '') || DEFAULT_ENDPOINTS[apiType],
         rawEndpoint: !!c.rawEndpoint,
+        ...(apiType === 'atlas' ? { loras: c.loras || [], loraTriggers: c.loraTriggers || '' } : {}),
     };
 }
 
@@ -391,25 +492,56 @@ async function generateImageOnce(conn, prompt, refs = [], { aspect = '1:1', time
         if (conn.apiType === 'atlas') {
             const base = conn.endpoint;
             const info = ATLAS_EDIT[conn.model] || ATLAS_EDIT[DEFAULT_MODELS.atlas];
-            const useRefs = refs.slice(0, info.max);
-            const model = useRefs.length ? conn.model : info.t2i;
+            let useRefs = refs.slice(0, info.max || 0);
+            const model = useRefs.length ? conn.model : (info.t2i || conn.model);
             const auth = { Authorization: `Bearer ${conn.apiKey}` };
+            const ar = /^\d+(\.\d+)?:\d+(\.\d+)?$/.test(aspect) ? aspect : '2:3';
+            let p = prompt;
+            if (info.lora && conn.loraTriggers) p = `${conn.loraTriggers}\n${p}`;
+            if (useRefs.length && info.compose) p = `${COMPOSE_NOTE}\n${p}`;
             let body;
+            let refsAreUrls = false;
             if (info.kind === 'kontext') {
                 body = useRefs.length
-                    ? { model, prompt, num_images: 1, enable_base64_output: true, seed: -1, guidance_scale: 2.5, num_inference_steps: 28, image: useRefs[0] }
-                    : { model, prompt, num_images: 1, enable_base64_output: true, seed: -1, size: '1024*1024', guidance_scale: 3.5 };
+                    ? { model, prompt: p, num_images: 1, enable_base64_output: true, seed: -1, guidance_scale: 2.5, num_inference_steps: 28, image: useRefs[0] }
+                    : { model, prompt: p, num_images: 1, enable_base64_output: true, seed: -1, size: '1024*1024', guidance_scale: 3.5 };
+                if (info.lora && conn.loras?.length) body.loras = conn.loras;
+            } else if (info.kind === 'fluxdev') {
+                body = { model, prompt: p, num_images: 1, enable_base64_output: true, seed: -1, size: '1024*1024', guidance_scale: 3.5, strength: 0.8 };
+                if (info.lora && conn.loras?.length) body.loras = conn.loras;
             } else {
-                body = { model, prompt, enable_base64_output: true };
-                if (info.kind === 'gpt') {
-                    const [w, h] = aspect.split(':').map(Number);
+                body = { model, prompt: info.kind === 'mj' ? mjPrompt(p) : p, enable_base64_output: true };
+                const k = info.kind;
+                if (k === 'gpt') {
+                    const [w, h] = ar.split(':').map(Number);
                     body.size = w > h ? '1536x1024' : w < h ? '1024x1536' : '1024x1024';
                     body.quality = 'high';
-                } else {
-                    body.aspect_ratio = aspect;
-                    if (info.kind === 'grok') body.resolution = '1k';
+                } else if (k === 'seedream') { body.size = seedreamSize(ar, SEEDREAM_SIZES); body.output_format = 'jpeg'; }
+                else if (k === 'seedream55') { body.size = seedreamSize(ar, SEEDREAM55_SIZES, true); body.output_format = 'jpeg'; }
+                else if (k === 'flux3') { body.aspect_ratio = snapAspect(ar, 'flux3'); body.resolution = '1k'; body.output_format = 'jpeg'; body.safety_tolerance = 4; }
+                else if (k === 'mai') {
+                    if (useRefs.length) { body.size = 'auto'; useRefs = await Promise.all(useRefs.map(d => shrinkDataUrl(d, 1152))); }
+                    body.prompt = `${body.prompt}\n\n${frameHint(ar)}`;
+                } else if (k === 'qwen') { body.size = qwenSize(ar, useRefs.length ? 1440 : 2048); body.n = 1; body.prompt_extend = false; }
+                else if (k === 'wan') {
+                    if (useRefs.length) { body.size = '2K'; body.n = 1; }
+                    body.prompt = `${body.prompt}\n\n${frameHint(ar)}`;
+                } else if (k === 'grok2') { body.aspect_ratio = snapAspect(ar, 'grok2'); body.resolution = '1k'; body.quality = 'medium'; body.num_images = 1; }
+                else if (k === 'krea') { body.image_size = kreaSize(ar, kreaAlt.has(model)); body.num_images = 1; body.output_format = 'jpeg'; }
+                else if (k === 'mj') { body.aspect_ratio = snapAspect(ar, 'mj'); body.stylize = 100; body.quality = 1; }
+                else {
+                    body.aspect_ratio = snapAspect(ar, k);
+                    if (k === 'grok') body.resolution = '1k';
                 }
-                if (useRefs.length) body[info.field] = useRefs;
+                if (useRefs.length && (info.url || atlasUrlOnly.has(model))) {
+                    // Midjourney (и модель, у которой Atlas уже не принял data URL) — картинки только ссылками, грузим сразу
+                    const urls = [];
+                    for (const u of useRefs) urls.push(await atlasUpload(base, conn.apiKey, u, to.signal));
+                    useRefs = urls;
+                    refsAreUrls = true;
+                }
+                if (useRefs.length) body[info.field] = info.single ? useRefs[0] : useRefs;
+                if (atlasNoB64.has(model)) delete body.enable_base64_output;
             }
             const submit = () => fetch(`${base}/api/v1/model/generateImage`, {
                 method: 'POST',
@@ -417,12 +549,29 @@ async function generateImageOnce(conn, prompt, refs = [], { aspect = '1:1', time
                 signal: to.signal,
                 body: JSON.stringify(body),
             });
+            const retryable = (st) => st >= 400 && st < 500 && ![401, 402, 429].includes(st);
             let r = await submit();
-            if (!r.ok && useRefs.length && info.kind !== 'kontext' && r.status >= 400 && r.status < 500 && ![401, 402, 429].includes(r.status)) {
+            if (!r.ok && useRefs.length && !refsAreUrls && info.kind !== 'kontext' && retryable(r.status)) {
                 // некоторые модели хотят ссылки, а не data:URI — заливаем рефы на Atlas и пробуем ещё раз
-                body[info.field] = [];
-                for (const u of useRefs) body[info.field].push(await atlasUpload(base, conn.apiKey, u, to.signal));
+                const why = await r.clone().text().catch(() => '');
+                if (!MODERATION_RE.test(why)) {
+                    const urls = [];
+                    for (const u of useRefs) urls.push(await atlasUpload(base, conn.apiKey, u, to.signal));
+                    body[info.field] = info.single ? urls[0] : urls;
+                    r = await submit();
+                    if (r.ok) atlasUrlOnly.add(model);
+                }
+            }
+            // модели с неполной схемой: на отказ «не тот параметр» — другие имена размеров (Krea) или без base64
+            for (let tries = 0; tries < 2 && info.loose && !r.ok && retryable(r.status); tries++) {
+                const why = await r.clone().text().catch(() => '');
+                if (MODERATION_RE.test(why)) break;
+                const sizeSwap = !!body.image_size && !kreaAlt.has(model) && /image_size|portrait|size/i.test(why);
+                if (sizeSwap) body.image_size = kreaSize(ar, true);
+                else if ('enable_base64_output' in body) delete body.enable_base64_output;
+                else break;
                 r = await submit();
+                if (r.ok) (sizeSwap ? kreaAlt : atlasNoB64).add(model);
             }
             if (!r.ok) await fail(r, 'Atlas');
             const j = await r.json();
