@@ -46,10 +46,10 @@ await era('1943');
 const in1943 = await cards();
 ok(in1943.length === 0, `в сороковых образов 2024-го нет: ${in1943.join(' | ') || 'пусто'}`);
 ok(await page.locator('.wd-lk-sec.shared').count() === 0, 'и общая пижама 2024-го не всплывает');
-ok(await page.locator('[data-act="all-eras"]').count() === 1, 'есть «🕰 Все эпохи»');
-await page.locator('[data-act="all-eras"]').click(); await sleep(300);
+ok(await page.locator('.wd-chip[data-act="all-eras"]').count() === 1, 'есть «🕰 Все эпохи»');
+await page.locator('.wd-chip[data-act="all-eras"]').click(); await sleep(300);
 ok((await cards()).length >= 9, '«Все эпохи» — видно всё');
-await page.locator('[data-act="all-eras"]').click(); await sleep(300);
+await page.locator('.wd-chip[data-act="all-eras"]').click(); await sleep(300);
 
 await page.evaluate(() => { window.__lookReply = { name: 'Шинель и берет', cat: 'Миссия', prompt: 'olive wool army greatcoat, black beret', items: [{ name: 'оливковая армейская шинель', slot: 'outer', desc: 'шерсть' }, { name: 'чёрный берет', slot: 'head', desc: '' }] }; window.__gens.length = 0; });
 await page.locator('.wd-lk-add').click(); await sleep(300);
@@ -120,6 +120,67 @@ const back = await cards();
 ok(!back.includes('Шинель и берет') && !back.includes('Блиндаж') && back.includes('Хеди, осень'), `в 2024 сороковых нет, своё на месте: ${back.length}`);
 const life = await page.evaluate(() => Wardrobe.setsFor('Хеди').map(x => x.name));
 ok(!life.includes('Шинель и берет') && life.includes('Хеди — вечер, чёрное'), 'Life (setsFor) — образы своей эпохи');
+
+// ── 1.8.7: её скрин 23.11 — группа сороковых, «Hedy Barlow · 85 образов», все 2024-го, аватарка белая ──
+console.log('— 1.8.7: снимок ядра от прошлого чата');
+await page.evaluate(() => Wardrobe.open('looks', 'Хеди')); await sleep(300);
+await page.evaluate(() => { window.__era = '1943'; window.__cxChat = 'chat-2024'; });   // чат уже сороковых, ядро ещё думает
+await sleep(650);
+await page.evaluate(() => window.__emit('chat_changed')); await sleep(300);
+await page.evaluate(() => Wardrobe.open('looks', 'Хеди')); await sleep(300);
+const pend = await cards();
+ok(!pend.includes('Хеди, осень') && !pend.includes('Хеди — вечер, чёрное'), `пока ядро думает — образов 2024-го нет: ${pend.join(' | ') || 'пусто'}`);
+ok(/определяется/.test(await page.locator('.wd-lk-era').innerText().catch(() => '')), 'и строка «эпоха чата ещё определяется»');
+await page.evaluate(() => { window.__cxChat = ''; });   // ядро пересобрало снимок, события не прислало
+await sleep(1600);
+const after = await cards();
+ok(after.includes('Шинель и берет') && !after.includes('Хеди, осень'), `ядро досчитало — сам перерисовал по эпохе: ${after.join(' | ')}`);
+ok(/1943/.test(await page.locator('.wd-lk-era').innerText()), `строка эпохи: «${(await page.locator('.wd-lk-era').innerText()).trim()}»`);
+
+console.log('— 1.8.7: персоны нет среди участников — облик персоны');
+await page.evaluate(() => { window.__dropMe = true; window.__emit('sacred-timeline:changed'); }); await sleep(400);
+const me = await cards();
+ok(me.includes('Шинель и берет') && !me.includes('Хеди, осень'), `облик Хеди — из персоны ядра: ${me.join(' | ')}`);
+await page.evaluate(() => { window.__dropMe = false; });
+
+console.log('— 1.8.7: образ без облика и образ того, кого в чате нет');
+await page.evaluate(() => {
+    const s = SillyTavern.getContext().extensionSettings.wardrobe;
+    s.sets.unshift({ id: 'nb1', name: 'Без облика, новый', owner: 'Хеди', itemIds: [], prompt: 'red silk dress', cat: 'Вечернее', at: Date.now() - 3600e3 });
+    s.sets.unshift({ id: 'nat1', name: 'Наташа — кожанка', owner: 'Natasha Romanoff', itemIds: [], prompt: 'black leather jacket', cat: 'Повседневное', at: Date.now() - 3600e3, slice: 'nat.2024' });
+    delete s.migrSlice187;
+    window.__emit('sacred-timeline:changed');
+});
+await page.waitForFunction(() => SillyTavern.getContext().extensionSettings.wardrobe.migrSlice187 === true, null, { timeout: 5000 });
+s = await S();
+ok(s.sets.find(x => x.id === 'nb1')?.slice === 'hedy.2024', `своё без облика — в шкаф основной ролки: ${s.sets.find(x => x.id === 'nb1')?.slice}`);
+await page.evaluate(() => Wardrobe.open('looks', '*')); await sleep(600);
+const allNow = await cards();
+ok(!allNow.includes('Без облика, новый') && !allNow.includes('Наташа — кожанка'), `в сороковых «✦ все»: нет ни образа без облика, ни Наташи 2024-го: ${allNow.join(' | ')}`);
+
+console.log('— 1.8.7: аватарка по облику');
+const ava = await page.locator('.wd-lk-who[data-name="Хеди"] img').getAttribute('src').catch(() => '');
+s = await S();
+ok(ava && ava === s.faces['Хеди@hedy.1943'] && ava !== s.faces['Хеди'], `в сороковых у Хеди — лицо облика, не 2024-го: ${ava}`);
+await page.evaluate(() => { const s = SillyTavern.getContext().extensionSettings.wardrobe; window.__f43 = s.faces['Хеди@hedy.1943']; delete s.faces['Хеди@hedy.1943']; });
+await page.evaluate(() => Wardrobe.open('looks', 'Хеди')); await sleep(400);
+const ava2 = await page.locator('.wd-lk-who[data-name="Хеди"] img').getAttribute('src').catch(() => '');
+ok(/type=persona&file=Hedy%201943\.png/.test(ava2), `своего лица у облика нет — аватар персоны эпохи: ${ava2}`);
+await page.evaluate(() => { SillyTavern.getContext().extensionSettings.wardrobe.faces['Хеди@hedy.1943'] = window.__f43; });
+
+console.log('— 1.8.7: эпоха у образа руками');
+await page.evaluate(() => Wardrobe.open('looks', 'Хеди')); await sleep(400);
+await page.locator('.wd-lk-card:has(.wd-lk-name:text-is("Шинель и берет")) .wd-lk-info').click(); await sleep(400);
+const opts = await page.locator('.wd-modal select[data-f="slice"] option').evaluateAll(o => o.map(x => x.value));
+ok(opts.includes('hedy.1943') && opts.includes('hedy.2024') && opts.includes(''), `в окне образа — выбор эпохи: ${opts.join(', ')}`);
+await page.locator('.wd-modal select[data-f="slice"]').selectOption('hedy.2024');
+await page.locator('.wd-modal [data-act="look-save"]').click(); await sleep(400);
+s = await S();
+ok(s.sets.find(x => x.name === 'Шинель и берет')?.slice === 'hedy.2024', 'образ ушёл в 2024');
+ok(!(await cards()).includes('Шинель и берет'), 'и из сороковых пропал');
+const line = await page.locator('.wd-lk-era').innerText();
+ok(/в других эпохах/.test(line), `строка: «${line.trim()}»`);
+await page.evaluate(() => { const s = SillyTavern.getContext().extensionSettings.wardrobe; s.sets.find(x => x.name === 'Шинель и берет').slice = 'hedy.1943'; });
 
 console.log('ошибки:', errs.length ? errs : 'нет');
 await b.close(); srv.kill();

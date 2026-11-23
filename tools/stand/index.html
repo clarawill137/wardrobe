@@ -86,7 +86,7 @@
         ],
     };
     const c = {
-        name1: 'Хеди', chatId: 'chat1', groupId: 'g1', characterId: undefined, groups, characters, chat: [{ mes: 'Привет', is_user: true, name: 'Хеди' }],
+        name1: 'Хеди', chatId: 'chat1', getCurrentChatId: () => 'chat1', groupId: 'g1', characterId: undefined, groups, characters, chat: [{ mes: 'Привет', is_user: true, name: 'Хеди' }],
         extensionSettings, chatMetadata,
         saveSettingsDebounced() { window.__saved = (window.__saved || 0) + 1; },
         saveMetadataDebounced() {},
@@ -118,9 +118,11 @@
     window.SacredTimeline = {
         version: 'stand',
         context: () => ({
-            v: 1, world: { id: 'w1', defaultEra: '2024' }, era: { id: window.__era, label: window.__era }, explicit: true, chatId: 'chat1',
+            // __cxChat — снимок от другого чата (ядро ещё не пересобрало его после смены чата); __dropMe — персоны нет в people
+            v: 1, world: { id: 'w1', defaultEra: '2024' }, era: { id: window.__era, label: window.__era }, explicit: true, chatId: window.__cxChat || 'chat1',
             date: window.__era === '1943' ? '1943-12' : '2024-11-20',
-            people: Object.fromEntries(Object.entries(SLICES[window.__era] || {}).map(([n, sl]) => [n, { identity: ID[n], slice: sl, label: sl }])), ext: {},
+            persona: { identity: 'hedy', slice: SLICES[window.__era]?.['Хеди'] || null, avatar: window.__era === '1943' ? 'Hedy 1943.png' : 'user-default.png' },
+            people: Object.fromEntries(Object.entries(SLICES[window.__era] || {}).filter(([n]) => !(window.__dropMe && n === 'Хеди')).map(([n, sl]) => [n, { identity: ID[n], slice: sl, label: sl }])), ext: {},
         }),
         mode: () => 'on',
         chronograph: async () => ({ defaultEra: '2024', eras: [{ id: '1943', from: '1943-12' }, { id: '2024', from: '2024-11-19' }] }),

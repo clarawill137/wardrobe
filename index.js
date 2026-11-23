@@ -15,7 +15,7 @@ import { STYLES, DEFAULT_MODELS, NAISTERA_MODELS, ATLAS_EDIT, atlasTakesRefs, re
 
 const MODULE = 'wardrobe';
 const PROMPT_KEY = 'wardrobe_state';
-const VERSION = '1.8.6';
+const VERSION = '1.8.7';
 
 const DEFAULTS = {
     enabled: true,
@@ -187,16 +187,22 @@ function cardOf(name) {
 
 function avatarUrl(name, { preferFace = false } = {}) {
     const c = ctx();
+    // 1.8.7: в другой эпохе — лицо этого облика, персона эпохи, карточка эпохи; лицо основной ролки — последним
+    // (в сороковых у Хеди была белая аватарка 2024-го)
+    const past = offDefault();
     if (preferFace) {
-        const f = settings().faces?.[name];
+        const f = settings().faces?.[faceKey(name)] || (past ? '' : settings().faces?.[name]);
         if (f) return f;
     }
     if (name === c.name1) {
+        const pa = past ? cxNow()?.persona?.avatar : '';
+        if (pa) return `/thumbnail?type=persona&file=${encodeURIComponent(pa)}`;
         const img = document.querySelector('#chat .mes[is_user="true"] .avatar img');
-        return img?.getAttribute('src') || '';
+        return img?.getAttribute('src') || (preferFace && past ? settings().faces?.[name] || '' : '');
     }
     const ch = cardOf(name);
-    return ch?.avatar ? `/thumbnail?type=avatar&file=${encodeURIComponent(ch.avatar)}` : '';
+    if (ch?.avatar) return `/thumbnail?type=avatar&file=${encodeURIComponent(ch.avatar)}`;
+    return preferFace && past ? settings().faces?.[name] || '' : '';
 }
 
 // ───────────── инъекция в промпт ─────────────
@@ -915,29 +921,63 @@ function syncItemImg(it) {
 // Вещь и комплект помнят облик владельца (slice); в чате эпохи видно своё и общее, «Все эпохи» — всё сразу.
 // Без ядра и вне мира — всё как раньше.
 
-let peopleMemo = { at: 0, v: {} };
-const people = () => {
-    // context() отдаёт копию — на отрисовку шкафа берём её раз в полсекунды, а не на каждую вещь
-    if (Date.now() - peopleMemo.at < 500) return peopleMemo.v;
-    let v = {};
-    try { v = globalThis.SacredTimeline?.context?.()?.people || {}; } catch { v = {}; }
-    peopleMemo = { at: Date.now(), v };
-    return v;
-};
-const sliceNow = (name) => (name && people()[name]?.slice) || null;
-const sliceLabel = (name) => (name && people()[name]?.label) || '';
+// Снимок ядра — только этого чата (1.8.7). После смены чата ядро пересобирает снимок не сразу (персона эпохи, память
+// эпохи), а context() до тех пор отдаёт снимок прошлого чата — с ним в сороковых был шкаф 2024-го. Такой снимок — «ждём».
+let cxMemo = { at: 0, v: null };
+/** Снимок ядра этого чата (копия, память на полсекунды); { pending: true } — ядро ещё думает; null — ядра нет. */
+function cxNow() {
+    if (Date.now() - cxMemo.at < 500) return cxMemo.v;
+    let cx = null;
+    try { cx = globalThis.SacredTimeline?.context?.() || null; } catch { cx = null; }
+    if (cx) {
+        let chat = null;
+        try { chat = ctx().getCurrentChatId?.() || null; } catch { chat = null; }
+        if (cx.chatId && chat && String(cx.chatId) !== String(chat)) cx = { pending: true };
+    }
+    cxMemo = { at: Date.now(), v: cx };
+    return cx;
+}
+/** Чат сменился или ядро прислало снимок — память долой (иначе полсекунды рисовался бы прошлый). */
+function dropEraMemo() { cxMemo = { at: 0, v: null }; }
+const eraPending = () => !!cxNow()?.pending;
+const people = () => { const cx = cxNow(); return (cx && !cx.pending && cx.people) || {}; };
+
+/**
+ * Облик человека в этом чате: участник или персона — из снимка ядра; кого в чате нет — по дате чата из Реестра
+ * (sliceAt, память на чат). undefined — ещё узнаём (перерисую сама); null — человека нет в Реестре или ядра нет;
+ * { slice, label } — облик (slice: null — человек есть в Реестре, но не в этом времени).
+ */
+const hereMemo = new Map();
+function sliceHere(name) {
+    if (!name) return null;
+    const cx = cxNow();
+    if (!cx || cx.pending || !cx.era) return cx?.pending ? undefined : null;
+    const p = cx.people?.[name];
+    if (p) return p.identity ? { slice: p.slice || null, label: p.label || '', identity: p.identity } : null;
+    let me = '';
+    try { me = ctx().name1 || ''; } catch { me = ''; }
+    if (name === me && cx.persona?.slice) return { slice: cx.persona.slice, label: '', identity: cx.persona.identity || '' };
+    const key = `${cx.chatId || ''}|${cx.date || cx.era.from || ''}|${name}`;
+    if (hereMemo.has(key)) { const v = hereMemo.get(key); return v === 'wait' ? undefined : v; }
+    const api = globalThis.SacredTimeline;
+    if (typeof api?.sliceAt !== 'function') return null;
+    hereMemo.set(key, 'wait');
+    Promise.resolve(api.sliceAt(name, cx.date || cx.era.from || '')).then(
+        (r) => hereMemo.set(key, r?.identity ? { slice: r.slice || null, label: r.label || '', identity: r.identity } : null),
+        () => hereMemo.set(key, null),
+    ).finally(() => { if (ui.open) render(); });
+    return undefined;
+}
+const sliceNow = (name) => sliceHere(name)?.slice || null;
+const sliceLabel = (name) => sliceHere(name)?.label || '';
 
 // с этого дня в мире есть эпохи; всё, что легло в шкаф раньше, — из основной ролки
 const EPOCHS = Date.parse('2026-11-07T00:00:00Z');
 
-// эпоха этого чата и эпоха мира по умолчанию (основная ролка) — по ядру; без ядра или вне мира — ''
-let eraMemo = { at: 0, cur: '', def: '' };
+/** Эпоха этого чата и эпоха мира по умолчанию (основная ролка) — по ядру; без ядра, вне мира или пока ядро думает — ''. */
 function eraIds() {
-    if (Date.now() - eraMemo.at < 500) return eraMemo;
-    let cx = null;
-    try { cx = globalThis.SacredTimeline?.context?.() || null; } catch { cx = null; }
-    eraMemo = { at: Date.now(), cur: String(cx?.era?.id || ''), def: String(cx?.world?.defaultEra || '') };
-    return eraMemo;
+    const cx = cxNow();
+    return cx && !cx.pending ? { cur: String(cx.era?.id || ''), def: String(cx.world?.defaultEra || '') } : { cur: '', def: '' };
 }
 const eraNow = () => eraIds().cur;
 /** Чат — не в основной ролке, а в другой эпохе мира (1943, 2013, 2014…). */
@@ -956,33 +996,52 @@ function sharedEra(x) {
 }
 
 /**
- * Видно ли вещь (образ) в этом чате. Своё — по облику владельца (облик 1943-го ≠ он же в 2024-м); общее — общее
- * внутри эпохи (пижама 2024-го не всплывает в сороковых). «Все эпохи» — всё. strict — без «Все эпохи» (для модели).
+ * Видно ли вещь (образ) в этом чате. Своё — по облику владельца (облик 1943-го ≠ он же в 2024-м; владельца нет в чате —
+ * его облик на дату чата); общее — общее внутри эпохи (пижама 2024-го не всплывает в сороковых). «Все эпохи» — всё.
+ * strict — без «Все эпохи» (для модели). Пока ядро не пересобрало снимок после смены чата — помеченное эпохой не видно.
  */
 function inEra(x, strict = false) {
     if (!x || (!strict && ui.allEras)) return true;
+    const cx = cxNow();
+    if (!cx) return true;
+    if (cx.pending) return !x.slice && !x.era;
+    if (!cx.era) return true;   // чат вне мира — всё как раньше
     if (!x.owner) {
         const cur = eraNow();
         const e = cur ? sharedEra(x) : '';
         return !cur || !e || e === cur;
     }
-    if (!x.slice) return true;
-    const now = sliceNow(x.owner);
-    return !now || now === x.slice;
+    const h = sliceHere(x.owner);
+    if (h === undefined) return !x.slice;   // облик владельца ещё узнаём — помеченное покажу, когда узнаю
+    if (h === null) return true;            // человека нет в Реестре — его вещи не делятся по эпохам
+    if (!x.slice) return h.slice != null;   // без облика: там, где человек есть
+    return h.slice === x.slice;
 }
-const eraOn = () => Object.values(people()).some(p => p?.slice) || !!eraNow();
+const eraOn = () => { const cx = cxNow(); return !!cx && (!!cx.pending || !!cx.era); };
 
 /** Владелец сменился — облик (или эпоха общего) под нового. */
 function retag(x, owner) {
     if (owner) {
         delete x.era;
-        const sl = sliceNow(owner);
-        if (sl) x.slice = sl; else delete x.slice;
+        const h = sliceHere(owner);
+        if (h?.slice) x.slice = h.slice; else delete x.slice;
+        if (h === undefined) sliceLater(x, owner);   // ядро ещё не ответило — облик допишу, как узнаю
     } else {
         delete x.slice;
         const e = eraNow();
         if (e) x.era = e; else delete x.era;
     }
+}
+
+/** Облик владельца, когда ядро его ещё не знало (свежий чат, человек не из чата): по дате чата из Реестра. */
+async function sliceLater(x, owner) {
+    const api = globalThis.SacredTimeline;
+    if (typeof api?.sliceAt !== 'function') return;
+    for (let i = 0; i < 20 && eraPending(); i++) await new Promise(r => setTimeout(r, 500));
+    const cx = cxNow();
+    if (!cx || cx.pending || !cx.era) return;
+    const r = await Promise.resolve(api.sliceAt(owner, cx.date || cx.era.from || '')).catch(() => null);
+    if (r?.slice && x.owner === owner && !x.slice) { x.slice = r.slice; saveSettings(); if (ui.open) render(); }
 }
 
 function addToCloset({ name, slot, desc = '', img = '', owner = '' }) {
@@ -1023,7 +1082,8 @@ async function migrateSlices() {
     const s = settings();
     const api = globalThis.SacredTimeline;
     if (!s.migrSlice182) { s.migrSlice = false; s.migrSlice182 = true; }
-    if (migrBusy || s.migrSlice || typeof api?.sliceAt !== 'function' || typeof api?.chronograph !== 'function') return;
+    if (migrBusy || typeof api?.sliceAt !== 'function' || typeof api?.chronograph !== 'function') return;
+    if (s.migrSlice) return migrateSliceless();
     migrBusy = true;
     try {
         if (!(await baseDate())) return; // ядро ещё не готово — в следующий раз
@@ -1055,6 +1115,32 @@ async function migrateSlices() {
         saveSettings();
         if (n) { console.log(`[Гардероб] облики: шкаф основной ролки и чужие облики поправлены (${n})`); if (ui.open) render(); }
     } finally { migrBusy = false; }
+    await migrateSliceless();
+}
+
+/**
+ * 1.8.7: своё без облика — шкаф основной ролки (как старое до эпох). Без облика вещь и образ оставались, когда ядро не
+ * называло облик владельца в момент записи (снимок прошлого чата, владелец не из чата) — и такие видно было во всех
+ * эпохах: в сороковых — образы Хеди 2024-го. У кого облика в основной ролке нет (Стив, Пегги…) — как было.
+ */
+let migrBusy2 = false;
+async function migrateSliceless() {
+    const s = settings();
+    const api = globalThis.SacredTimeline;
+    if (migrBusy2 || s.migrSlice187 || !s.migrSlice || typeof api?.sliceAt !== 'function') return;
+    migrBusy2 = true;
+    try {
+        if (!(await baseDate())) return;
+        let n = 0;
+        for (const x of [...s.items, ...s.sets]) {
+            if (!x.owner || x.slice) continue;
+            const sl = await baseSlice(x.owner);
+            if (sl) { x.slice = sl; n++; }
+        }
+        s.migrSlice187 = true;
+        saveSettings();
+        if (n) { console.log(`[Гардероб] облики: своё без облика — в шкаф основной ролки (${n})`); if (ui.open) render(); }
+    } finally { migrBusy2 = false; }
 }
 
 /** Образу дали владельца (разбор 1.8.1 или руками) — облик: старому — основной ролки, новому — нынешний. */
@@ -1062,7 +1148,8 @@ async function sliceForOwner(set, owner) {
     delete set.era;
     const t = bornAt(set);
     const sl = !t || t < EPOCHS ? await baseSlice(owner) : sliceNow(owner);
-    if (sl) set.slice = sl; else delete set.slice;
+    if (sl) set.slice = sl;
+    else { delete set.slice; if (t >= EPOCHS && sliceHere(owner) === undefined) sliceLater(set, owner); }
 }
 
 function wearItem(who, it) {
@@ -1435,6 +1522,7 @@ const lookGrid = (list) => `<div class="wd-lk-grid">${list.map(lookCard).join(''
 
 function renderLooks() {
     const s = settings();
+    if (!regIds && eraOn()) regLoad();   // облики владельцев — для выбора эпохи в окне образа
     // 1.8.1: старые комплекты без владельца (прежний конструктор ставил «общее») разложить по людям — один раз
     if (!s.ownFix181) {
         s.ownFix181 = true;
@@ -1465,6 +1553,18 @@ function renderLooks() {
     if (ui.lkCat === 'none' && !nNone) ui.lkCat = 'all';
     if (!['all', 'new', 'none'].includes(ui.lkCat) && !cats.some(c => catKey(c) === catKey(ui.lkCat))) ui.lkCat = 'all';
     const whoName = ui.lkWho === '*' ? 'Все персонажи' : ui.lkWho;
+    // 1.8.7: какая эпоха и чей облик сейчас, сколько образов спрятано в других эпохах — видно, что шкаф по эпохам работает
+    const eraLine = (() => {
+        if (!eraOn()) return '';
+        if (eraPending()) return '<div class="wd-lk-era"><i class="fa-solid fa-spinner fa-spin"></i> эпоха чата ещё определяется…</div>';
+        const cx = cxNow();
+        if (!cx?.era) return '';
+        const who = ui.lkWho && ui.lkWho !== '*' ? ui.lkWho : '';
+        const lbl = who ? sliceLabel(who) : '';
+        const other = ui.allEras ? 0 : s.sets.filter(x => !x.pending && (!who || x.owner === who) && !inEra(x)).length;
+        const era = String(cx.era.label || cx.era.id || '');
+        return `<div class="wd-lk-era">🕰 ${esc(cut(era, 40))}${lbl ? ` · ${esc(cut(lbl, 44))}` : ''}${other ? ` · <button class="wd-link" data-act="all-eras">ещё ${other} — в других эпохах</button>` : ''}</div>`;
+    })();
     const chip = (k, label, n) => `<button class="wd-chip ${ui.lkCat === k ? 'on' : ''}" data-act="look-cat" data-cat="${esc(k)}">${label}${n ? `<small>${n}</small>` : ''}</button>`;
     const head = `<div class="wd-lk-head">
         <div class="wd-lk-top">
@@ -1483,6 +1583,7 @@ function renderLooks() {
             <span><b>${esc(cut(whoName, 28))}</b> · ${all.length} ${plural(all.length, 'образ', 'образа', 'образов')}${shared.length ? ` · общих ${shared.length}` : ''}</span>
             <button class="wd-lk-style" data-act="look-style" title="Стиль картинок"><i class="fa-solid fa-palette"></i> ${esc(styleShort(s))}</button>
         </div>
+        ${eraLine}
         <div class="wd-chips wd-lk-cats">
             ${chip('all', 'Все', '')}
             ${nNew ? chip('new', '✦ Новинки', nNew) : ''}
@@ -1500,7 +1601,7 @@ function renderLooks() {
     if (!all.length) {
         return `${head}<div class="wd-lk-empty">
             <div class="wd-empty-ico">🎽</div>
-            <b>${ui.lkWho === '*' ? 'Образов пока нет' : `У ${esc(shortName(ui.lkWho))} пока нет образов`}</b>
+            <b>${ui.lkWho === '*' ? 'Образов пока нет' : `У ${esc(shortName(ui.lkWho))} пока нет образов${offDefault() && !ui.allEras ? ' этой эпохи' : ''}`}</b>
             <p>Загрузи фото образа или вставь готовый промт — ИИ сам считает его, разложит на вещи и положит их в шкаф.</p>
             <button class="wd-btn primary" data-act="look-add"><i class="fa-solid fa-plus"></i> Новый образ</button>
             <div class="wd-actions-row">
@@ -1680,6 +1781,7 @@ function lookModal(id) {
             <div class="wd-field"><label>Чей</label>${ownerSelect(set.owner)}</div>
             <div class="wd-field"><label>Раздел</label>${catSelect(set.cat || '', 'data-f="cat"')}</div>
         </div>
+        ${set.owner && eraOn() ? sliceSelect(set) : ''}
         <div class="wd-field"><label>Промт образа <small>(по-английски: по нему рисуется, его копирует ⧉)</small></label>
             <textarea rows="4" data-f="prompt" placeholder="пусто — рисую по списку вещей">${esc(set.prompt || '')}</textarea></div>
         ${set.src?.text ? `<details class="wd-src"><summary>Исходный промт, который ты вставила</summary><pre class="wd-pre">${esc(set.src.text)}</pre></details>` : ''}
@@ -1837,6 +1939,20 @@ function render() {
         body.innerHTML = `<div class="wd-empty"><div class="wd-empty-ico">🧯</div><b>Ошибка гардероба</b><pre class="wd-pre" style="text-align:left">${esc(String(e?.stack || e).slice(0, 900))}</pre>Сделай скрин и кинь Claude.</div>`;
     }
     body.scrollTop = scroll;
+    if (eraPending()) pendingRerender();
+}
+
+// ядро ещё не пересобрало снимок этого чата: перерисовать, как пересоберёт (и без события — проверкой раз в 0,7 с, до 18 с)
+let pendT = null, pendN = 0;
+function pendingRerender() {
+    if (pendT) return;
+    pendT = setTimeout(() => {
+        pendT = null;
+        dropEraMemo();
+        if (!ui.open) { pendN = 0; return; }
+        if (eraPending()) { if (++pendN > 25) return; } else pendN = 0;
+        render();
+    }, 700);
 }
 
 // ───── модалки внутри плашки ─────
@@ -1913,6 +2029,42 @@ function itemMenu(id) {
 
 function slotSelect(value, attr = 'data-f="slot"') {
     return `<select ${attr}>${SLOTS.map(sl => `<option value="${sl.k}" ${sl.k === value ? 'selected' : ''}>${sl.i} ${esc(sl.t)}</option>`).join('')}</select>`;
+}
+
+// ── эпоха у образа руками (1.8.7): облики личности владельца из Реестра ядра ──
+let regIds = null;   // [{ id, names: [норм.], slices: [{ id, label, from, to }] }]
+let regBusy = null;
+function regLoad() {
+    if (regIds || regBusy) return regBusy;
+    const api = globalThis.SacredTimeline;
+    if (typeof api?.registry !== 'function') return null;
+    regBusy = Promise.resolve(api.registry()).then((reg) => {
+        const out = [];
+        for (const e of Object.values(reg?.entries || {})) {
+            const g = e?.gc;
+            if (g?.type !== 'identity' || !g.id || !(g.slices || []).length) continue;
+            out.push({ id: g.id, names: [g.name, ...(g.aliases || [])].filter(Boolean).map(norm),
+                slices: g.slices.filter(x => x?.id).map(x => ({ id: x.id, label: x.label || x.id, from: String(x.from || ''), to: String(x.to || '') })) });
+        }
+        regIds = out;
+    }).catch(() => { regIds = []; }).finally(() => { regBusy = null; });
+    return regBusy;
+}
+/** Облики владельца по Реестру ([] — его там нет; null — Реестр ещё не прочитан). «Steve Rogers 1943» — как «Steve Rogers». */
+function slicesFor(owner) {
+    if (!regIds || !owner) return null;
+    const id = sliceHere(owner)?.identity;
+    const a = norm(owner), b = norm(String(owner).replace(/\s+(19|20)\d{2}$/, ''));
+    return regIds.find(x => (id && x.id === id) || x.names.includes(a) || x.names.includes(b))?.slices || [];
+}
+function sliceSelect(set) {
+    const list = slicesFor(set?.owner);
+    if (!list?.length) return '';
+    const y = (d) => String(d || '').slice(0, 4);
+    const opts = [...list].sort((p, q) => p.from.localeCompare(q.from))
+        .map(sl => `<option value="${esc(sl.id)}" ${sl.id === set.slice ? 'selected' : ''}>${esc(`${y(sl.from) || '…'}–${y(sl.to) || 'сейчас'} · ${cut(sl.label, 46)}`)}</option>`);
+    return `<div class="wd-field"><label>Эпоха <small>(облик: в чатах других эпох образ не виден)</small></label><select data-f="slice">
+        <option value="" ${!set.slice ? 'selected' : ''}>без эпохи — везде, где есть ${esc(shortName(set.owner))}</option>${opts.join('')}</select></div>`;
 }
 
 function ownerSelect(value, attr = 'data-f="owner"') {
@@ -2462,6 +2614,11 @@ async function onClick(ev) {
             const f = readForm(box);
             const owner = f.owner;
             if (owner !== set.owner) retag(set, owner);
+            else {
+                // 1.8.7: эпоха руками (если владелец тот же)
+                const sel = box.querySelector('[data-f="slice"]');
+                if (sel) { if (sel.value) set.slice = sel.value; else delete set.slice; }
+            }
             Object.assign(set, {
                 name: f.name || set.name,
                 owner,
@@ -3025,6 +3182,7 @@ jQuery(async () => {
     eventSource.on(eventTypes.CHAT_CHANGED, () => {
         ui.who = '';
         ui.allEras = false;
+        dropEraMemo();
         closeModal();
         migrateSlices().catch(e => console.warn('[Гардероб] облики', e));
         try { autoDedupeOnce(); } catch (e) { console.warn('[Гардероб] склейка', e); }
@@ -3040,6 +3198,7 @@ jQuery(async () => {
     eventSource.on(eventTypes.MESSAGE_SWIPED, (mesId) => onSwiped(Number(mesId)));
     // ядро узнало эпоху и облики этого чата — шкаф показывает своё
     eventSource.on('sacred-timeline:changed', () => {
+        dropEraMemo();   // 1.8.7: снимок новый — полсекундная память о прошлом не в счёт
         migrateSlices().catch(e => console.warn('[Гардероб] облики', e)); // ядро могло проснуться позже чата
         if (ui.open) render();
     });

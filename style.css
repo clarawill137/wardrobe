@@ -971,6 +971,15 @@
     cursor: pointer;
 }
 .wd-lk-style i { color: var(--wd-accent); margin-right: 3px; }
+/* 1.8.7: эпоха чата и облик — строкой под «Hedy Barlow · N образов» */
+.wd-lk-era {
+    margin: 4px 2px 0;
+    font-size: 0.78em;
+    opacity: 0.72;
+    line-height: 1.35;
+}
+.wd-lk-era .wd-link { font-size: inherit; padding: 0; }
+.wd-lk-era i { margin-right: 3px; }
 .wd-lk-cats { padding: 8px 0 8px; }
 .wd-lk-cats .wd-chip {
     padding: 9px 15px;
